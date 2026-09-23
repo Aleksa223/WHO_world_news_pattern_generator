@@ -1,0 +1,23 @@
+name: who-world-news
+
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: who-world-news-airflow:3.3.1
+    command: standalone
+    restart: unless-stopped
+    environment:
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+      WHO_NEWS_PROJECT_ROOT: /opt/airflow/project
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - airflow_home:/opt/airflow
+      - ./:/opt/airflow/project
+
+volumes:
+  airflow_home:

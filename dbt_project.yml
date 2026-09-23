@@ -1,0 +1,13 @@
+name: who_world_news
+version: "1.0.0"
+config-version: 2
+
+profile: who_world_news
+
+# The existing staging folder is the model layer for this small project.
+model-paths: ["staging", "intermediate", "marts"]
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  who_world_news:
+    +materialized: view

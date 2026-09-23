@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+articles/*.db
+articles/*.json
+target/
+logs/
+.airflow/
+dbt_packages/
+.user.yml
+debug.log
