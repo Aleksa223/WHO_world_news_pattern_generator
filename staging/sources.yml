@@ -6,3 +6,45 @@ sources:
     schema: main
     tables:
       - name: articles
+
+  - name: campaign_news
+    description: Raw WHO campaign data stored in the local SQLite database.
+    schema: campaign_news
+    tables:
+      - name: articles
+        identifier: campaigns
+
+  - name: commentary_news
+    description: Raw WHO commentary data stored in the local SQLite database.
+    schema: commentary_news
+    tables:
+      - name: articles
+        identifier: commentaries
+
+  - name: event_news
+    description: Raw WHO event data stored in the local SQLite database.
+    schema: event_news
+    tables:
+      - name: articles
+        identifier: events
+
+  - name: speech_news
+    description: Raw WHO speech data stored in the local SQLite database.
+    schema: speech_news
+    tables:
+      - name: articles
+        identifier: speeches
+
+  - name: statement_news
+    description: Raw WHO statement data stored in the local SQLite database.
+    schema: statement_news
+    tables:
+      - name: articles
+        identifier: statements
+
+  - name: stories_news
+    description: Raw WHO feature-story data stored in the local SQLite database.
+    schema: stories_news
+    tables:
+      - name: articles
+        identifier: feature_stories
