@@ -4,14 +4,17 @@ who_world_news:
     dev:
       type: sqlite
       threads: 1
-      database: who_news
+      database: analytics
       schema: main
       schemas_and_paths:
-        main: articles/who_news.db
-        campaign_news: articles/campaign_news.db
-        commentary_news: articles/commentary_news.db
-        event_news: articles/event_news.db
-        speech_news: articles/speech_news.db
-        statement_news: articles/statement_news.db
-        stories_news: articles/stories_news.db
-      schema_directory: articles
+        main: warehouse/analytics.db
+        who_news: articles/who_news.db
+        campaign_news: articles/who_campaign_news.db
+        commentary_news: articles/who_commentary_news.db
+        event_news: articles/who_event_news.db
+        speech_news: articles/who_speech_news.db
+        statement_news: articles/who_statement_news.db
+        stories_news: articles/who_stories_news.db
+        tech_articles: tech_articles/tech_news.db
+        economic_articles: economic_articles/economic_news.db
+      schema_directory: warehouse

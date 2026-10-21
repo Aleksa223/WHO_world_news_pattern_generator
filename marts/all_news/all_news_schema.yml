@@ -1,0 +1,99 @@
+version: 2
+
+models:
+  - name: all_news_mart_articles
+    description: >
+      One reporting-ready row for every WHO content item, Hacker News story,
+      and English-language GDELT economic article. The prefixed article key is
+      unique across all three streams. Publication timestamps remain nullable
+      when a source does not provide one; observation fields provide a
+      consistently populated reporting date instead.
+    columns:
+      - name: article_key
+        description: Globally unique key composed of the news stream and source record key.
+        data_tests:
+          - not_null
+          - unique
+      - name: article_id
+        description: Identifier supplied by the source, unique only within its stream and content type.
+        data_tests:
+          - not_null
+      - name: news_type
+        description: Broad news stream represented by the row.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [who, tech, economic]
+      - name: provider
+        description: API or organization through which the content was collected.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [WHO, Hacker News, GDELT]
+      - name: content_type
+        description: Source record kind, such as news, story, or article.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [news, statement, speech, commentary, feature_story, event, campaign, story, article]
+      - name: topic
+        description: Broad editorial domain used for cross-stream reporting.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [health, technology, economic]
+      - name: title
+        description: Display title supplied by the source, using the English title for economic articles.
+        data_tests:
+          - not_null
+      - name: normalized_title
+        description: Lowercase, trimmed title for exact-title comparisons.
+        data_tests:
+          - not_null
+      - name: url
+        description: Canonical content or article URL.
+        data_tests:
+          - not_null
+      - name: source
+        description: Publisher domain; WHO content uses who.int.
+        data_tests:
+          - not_null
+      - name: source_country
+        description: Publisher country when supplied by GDELT; otherwise null.
+      - name: language
+        description: ISO-style language label when known; Tech rows may be null.
+      - name: date_type
+        description: Meaning of the publication and observation timestamps.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [publication, event_start, unavailable, gdelt_observation]
+      - name: published_at
+        description: Source publication timestamp or GDELT observation proxy; null when unavailable.
+      - name: published_date
+        description: Calendar date derived from published_at; null when published_at is unavailable.
+      - name: observed_at
+        description: Best available source or ingestion timestamp for reporting.
+        data_tests:
+          - not_null
+      - name: observation_date
+        description: Calendar date derived from observed_at.
+        data_tests:
+          - not_null
+      - name: first_seen_at
+        description: First time the ingestion system stored this source record.
+        data_tests:
+          - not_null
+      - name: last_seen_at
+        description: Most recent time the ingestion system observed this source record.
+        data_tests:
+          - not_null
+      - name: fetched_at
+        description: Latest successful fetch that observed the row, equal to last_seen_at.
+        data_tests:
+          - not_null

@@ -1,0 +1,46 @@
+version: 2
+
+sources:
+  - name: economic_news
+    description: >
+      Raw English-language economic articles collected from the GDELT DOC 2.0
+      API and stored in the local economic-news SQLite database.
+    schema: economic_articles
+    tables:
+      - name: economic_articles
+        description: >
+          Canonical GDELT article metadata, including original and English
+          title lineage and ingestion timestamps.
+        columns:
+          - name: id
+            description: Stable SHA-256 identifier derived from the canonical URL.
+            data_tests:
+              - not_null
+              - unique
+          - name: title
+            description: User-facing English article title.
+            data_tests:
+              - not_null
+          - name: url
+            description: Canonical article URL.
+            data_tests:
+              - not_null
+              - unique
+          - name: item_type
+            description: Normalized content type supplied by ingestion.
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [article]
+          - name: language
+            description: GDELT source-language label.
+            data_tests:
+              - not_null
+          - name: category
+            description: Project content category assigned during ingestion.
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [economic]

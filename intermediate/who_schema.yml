@@ -1,0 +1,107 @@
+version: 2
+
+models:
+  - name: who_int_content
+    description: >
+      All staged WHO content combined into one reporting-friendly dataset. The
+      date_type column distinguishes publication dates from event start dates
+      and campaigns whose publication date is unavailable.
+    columns:
+      - name: content_key
+        description: Unique identifier composed of the content type and source ID.
+        data_tests:
+          - not_null
+          - unique
+      - name: content_type
+        description: Standardized WHO content category.
+        data_tests:
+          - not_null
+      - name: id
+        description: Identifier supplied by the WHO source.
+        data_tests:
+          - not_null
+      - name: normalized_news_type
+        description: Lowercase, trimmed source content type.
+        data_tests:
+          - not_null
+      - name: date_type
+        description: Meaning of the date fields for this record.
+        data_tests:
+          - not_null
+
+  - name: who_int_title_topics
+    description: >
+      Significant lowercase words extracted from WHO content titles. The grain
+      is one content item and one distinct literal word. The legacy topic
+      column remains literal, while canonical_topic provides optional grouped
+      word families.
+    columns:
+      - name: word_key
+        description: Unique identifier composed of content key and literal title word.
+        data_tests:
+          - not_null
+          - unique
+      - name: topic_key
+        description: Backward-compatible alias of word_key.
+        data_tests:
+          - not_null
+          - unique
+      - name: article_id
+        description: WHO content key exposed with the common title-analysis name.
+        data_tests:
+          - not_null
+      - name: content_key
+        description: Identifier of the WHO content item containing the topic.
+        data_tests:
+          - not_null
+      - name: content_type
+        description: Standardized WHO content category.
+        data_tests:
+          - not_null
+      - name: observation_date
+        description: Publication date, falling back to the ingestion date for undated content.
+        data_tests:
+          - not_null
+      - name: title
+        description: Full WHO content title.
+        data_tests:
+          - not_null
+      - name: normalized_title
+        description: Lowercase trimmed title used for distinct-title metrics.
+        data_tests:
+          - not_null
+      - name: title_word
+        description: Literal lowercase alphanumeric word extracted from the title.
+        data_tests:
+          - not_null
+      - name: topic
+        description: Backward-compatible literal topic word, equal to title_word.
+        data_tests:
+          - not_null
+      - name: canonical_topic
+        description: Conservative canonical word-family label used for grouped analysis.
+        data_tests:
+          - not_null
+      - name: is_mapped
+        description: One when the literal word has an explicit topic-map row, otherwise zero.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: source
+        description: WHO publisher domain.
+        data_tests:
+          - not_null
+      - name: category
+        description: WHO content type used as the title-analysis category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [news, statement, speech, commentary, feature_story, event, campaign]
+      - name: observed_at
+        description: Publication timestamp, falling back to ingestion time.
+        data_tests:
+          - not_null

@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-import who_statements
+import who_news_scripts.who_statements as who_statements
 
 
 class FakeResponse:
@@ -33,8 +33,8 @@ def api_item(item_id, title, news_type):
 
 
 class FetchStatementsTests(unittest.TestCase):
-    @patch("who_statements.PAGE_SIZE", 2)
-    @patch("who_statements.urlopen")
+    @patch("who_news_scripts.who_statements.PAGE_SIZE", 2)
+    @patch("who_news_scripts.who_statements.urlopen")
     def test_filters_statements_and_paginates_mixed_feed(self, mocked_urlopen):
         mocked_urlopen.side_effect = [
             FakeResponse(
@@ -77,7 +77,7 @@ class FetchStatementsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             who_statements.fetch_statements(limit=0)
 
-    @patch("who_statements.urlopen")
+    @patch("who_news_scripts.who_statements.urlopen")
     def test_rejects_unexpected_api_shape(self, mocked_urlopen):
         mocked_urlopen.return_value = FakeResponse({"items": []})
 
@@ -107,7 +107,7 @@ class SaveStatementsTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as directory:
-            database = Path(directory) / "statement_news.db"
+            database = Path(directory) / "who_statement_news.db"
             first_result = who_statements.save_statements(database, first_fetch)
             second_result = who_statements.save_statements(database, second_fetch)
 

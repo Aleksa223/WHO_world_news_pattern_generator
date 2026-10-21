@@ -1,0 +1,26 @@
+version: 2
+
+sources:
+  - name: tech_news
+    description: >
+      Raw Hacker News items stored by the token-free technology-news fetcher.
+    schema: tech_articles
+    tables:
+      - name: tech_articles
+        description: >
+          Normalized Hacker News items. The current fetcher loads stories;
+          other supported item types can use the same staging split when they
+          are added to raw ingestion.
+        columns:
+          - name: id
+            description: Unique Hacker News item ID.
+            data_tests:
+              - not_null
+              - unique
+          - name: item_type
+            description: Hacker News item type.
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [story, comment, job, poll, pollopt]

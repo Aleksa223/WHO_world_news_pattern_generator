@@ -29,7 +29,7 @@ DEFAULT_TIMEOUT = 30
 PAGE_SIZE = 100
 MAX_STATEMENTS = 1000
 MAX_SCANNED_ITEMS = 20_000
-DEFAULT_DATABASE = Path("articles/statement_news.db")
+DEFAULT_DATABASE = Path("articles/who_statement_news.db")
 
 
 class WhoStatementsError(RuntimeError):

@@ -1,6 +1,6 @@
-with staged_articles as (
+with staged_news as (
     select *
-    from {{ ref('stg_articles') }}
+    from {{ ref('who_stg_news') }}
 )
 
 select
@@ -19,4 +19,4 @@ select
     ) as article_slug,
     datetime(first_seen_at) as first_seen_at,
     datetime(last_seen_at) as last_seen_at
-from staged_articles
+from staged_news

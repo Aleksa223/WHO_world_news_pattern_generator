@@ -1,0 +1,27 @@
+version: 2
+
+seeds:
+  - name: economic_title_stopwords
+    description: Common English and economic-news boilerplate words excluded from title analysis.
+    columns:
+      - name: word
+        description: Lowercase word to exclude from economic title metrics.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: economic_title_topic_map
+    description: >
+      Conservative word-family mappings used to combine spelling and
+      singular/plural variants without merging different economic concepts.
+      Identity rows also retain meaningful terms shorter than four characters.
+    columns:
+      - name: word
+        description: Lowercase title word before grouping.
+        data_tests:
+          - not_null
+          - unique
+      - name: topic
+        description: Canonical topic assigned to the word.
+        data_tests:
+          - not_null

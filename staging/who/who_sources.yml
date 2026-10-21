@@ -3,7 +3,7 @@ version: 2
 sources:
   - name: who_news
     description: Raw WHO news data stored in the local SQLite database.
-    schema: main
+    schema: who_news
     tables:
       - name: articles
 

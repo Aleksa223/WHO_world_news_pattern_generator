@@ -1,0 +1,61 @@
+version: 2
+
+models:
+  - name: economic_int_title_topics
+    description: >
+      Significant lowercase words extracted from English economic-news titles.
+      The grain is one article and one distinct literal word; topic contains a
+      conservative canonical word-family label for optional grouped analysis.
+    columns:
+      - name: word_key
+        description: Unique identifier composed of article ID and literal title word.
+        data_tests:
+          - not_null
+          - unique
+      - name: article_id
+        description: Stable ID of the staged economic article containing the word.
+        data_tests:
+          - not_null
+      - name: observation_date
+        description: GDELT observation date, falling back to ingestion date.
+        data_tests:
+          - not_null
+      - name: title
+        description: Full English display title containing the word.
+        data_tests:
+          - not_null
+      - name: normalized_title
+        description: Lowercase trimmed title used for distinct-title metrics.
+        data_tests:
+          - not_null
+      - name: title_word
+        description: Literal lowercase alphanumeric word extracted from the title.
+        data_tests:
+          - not_null
+      - name: topic
+        description: Canonical word-family label; equals title_word when no mapping applies.
+        data_tests:
+          - not_null
+      - name: is_mapped
+        description: One when the literal word has an explicit topic-map row, otherwise zero.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: source
+        description: Source domain carrying the article.
+        data_tests:
+          - not_null
+      - name: publisher_country
+        description: Publisher country reported by GDELT, or Unknown.
+        data_tests:
+          - not_null
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [economic]

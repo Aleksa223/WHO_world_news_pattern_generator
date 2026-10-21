@@ -27,7 +27,7 @@ DEFAULT_TIMEOUT = 30
 PAGE_SIZE = 100
 MAX_ITEMS = 1000
 MAX_SCANNED_ITEMS = 20_000
-DEFAULT_DATABASE = Path("data/who_news.db")
+DEFAULT_DATABASE = Path("articles/who_news.db")
 
 
 class WhoNewsError(RuntimeError):

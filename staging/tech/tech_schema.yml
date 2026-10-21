@@ -1,0 +1,90 @@
+version: 2
+
+models:
+  - name: tech_stg_story
+    description: Hacker News story items prepared for downstream models.
+    columns:
+      - name: id
+        description: Unique Hacker News item ID.
+        data_tests:
+          - not_null
+          - unique
+      - name: item_type
+        description: Normalized Hacker News item type.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [story]
+      - name: title
+        description: Story title.
+        data_tests:
+          - not_null
+      - name: url
+        description: External article URL or Hacker News discussion URL.
+        data_tests:
+          - not_null
+
+  - name: tech_stg_comment
+    description: Hacker News comment items prepared for downstream models.
+    columns:
+      - name: id
+        description: Unique Hacker News item ID.
+        data_tests:
+          - not_null
+          - unique
+      - name: item_type
+        description: Normalized Hacker News item type.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [comment]
+
+  - name: tech_stg_job
+    description: Hacker News job items prepared for downstream models.
+    columns:
+      - name: id
+        description: Unique Hacker News item ID.
+        data_tests:
+          - not_null
+          - unique
+      - name: item_type
+        description: Normalized Hacker News item type.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [job]
+
+  - name: tech_stg_poll
+    description: Hacker News poll items prepared for downstream models.
+    columns:
+      - name: id
+        description: Unique Hacker News item ID.
+        data_tests:
+          - not_null
+          - unique
+      - name: item_type
+        description: Normalized Hacker News item type.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [poll]
+
+  - name: tech_stg_pollopt
+    description: Hacker News poll-option items prepared for downstream models.
+    columns:
+      - name: id
+        description: Unique Hacker News item ID.
+        data_tests:
+          - not_null
+          - unique
+      - name: item_type
+        description: Normalized Hacker News item type.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [pollopt]

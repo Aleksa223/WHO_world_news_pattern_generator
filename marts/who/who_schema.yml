@@ -1,0 +1,209 @@
+version: 2
+
+models:
+  - name: who_mart_news_monthly_summary
+    description: >
+      Monthly WHO content totals grouped by normalized type and date meaning.
+      Content without a known date is retained in the Unknown reporting period.
+    columns:
+      - name: published_year
+        description: Calendar year of the content date; null when unavailable.
+      - name: published_month
+        description: Calendar month of the content date; null when unavailable.
+      - name: reporting_period
+        description: YYYY-MM reporting period, or Unknown when no date is available.
+        data_tests:
+          - not_null
+      - name: date_type
+        description: Meaning of the date, such as publication, event_start, or unavailable.
+        data_tests:
+          - not_null
+      - name: normalized_news_type
+        description: Lowercase, trimmed WHO news type.
+        data_tests:
+          - not_null
+      - name: article_count
+        description: Number of content items in the period and news-type group.
+        data_tests:
+          - not_null
+
+  - name: who_mart_top_topics_by_category
+    description: Three most frequently occurring title topics in each content category.
+    columns:
+      - name: topic_key
+        description: Unique identifier composed of the content category and topic.
+        data_tests:
+          - not_null
+          - unique
+      - name: content_type
+        description: Standardized WHO content category.
+        data_tests:
+          - not_null
+      - name: topic
+        description: Normalized topic word extracted from content titles.
+        data_tests:
+          - not_null
+      - name: example_title
+        description: Most recent full title containing the topic.
+        data_tests:
+          - not_null
+      - name: title_count
+        description: Number of distinct titles in the category containing the topic.
+        data_tests:
+          - not_null
+      - name: first_occurrence_date
+        description: Earliest available content date for the topic; null when unavailable.
+      - name: last_occurrence_date
+        description: Latest available content date for the topic; null when unavailable.
+      - name: occurrence_period
+        description: Human-readable range between the first and last topic occurrence.
+        data_tests:
+          - not_null
+      - name: topic_rank
+        description: Topic frequency rank within its content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3]
+                quote: false
+
+  - name: who_mart_top_title_words
+    description: >
+      Twenty literal title words occurring across the most distinct WHO titles
+      within each content category.
+    columns:
+      - name: word_key
+        description: Unique identifier composed of content category and literal word.
+        data_tests:
+          - not_null
+          - unique
+      - name: category
+        description: WHO content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [news, statement, speech, commentary, feature_story, event, campaign]
+      - name: word_rank
+        description: Rank by distinct-title breadth within the content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+                quote: false
+      - name: title_word
+        description: Literal normalized word extracted from WHO titles.
+        data_tests:
+          - not_null
+      - name: unique_title_count
+        description: Number of distinct normalized titles containing the word.
+        data_tests:
+          - not_null
+      - name: content_count
+        description: Number of WHO content items containing the word.
+        data_tests:
+          - not_null
+      - name: corpus_unique_title_count
+        description: Distinct title count in the WHO content category.
+        data_tests:
+          - not_null
+      - name: corpus_content_count
+        description: Content item count in the WHO content category.
+        data_tests:
+          - not_null
+      - name: unique_title_percentage
+        description: Percentage of distinct category titles containing the word.
+        data_tests:
+          - not_null
+      - name: content_percentage
+        description: Percentage of category content items containing the word.
+        data_tests:
+          - not_null
+      - name: example_title
+        description: Most recently observed title containing the word.
+        data_tests:
+          - not_null
+      - name: first_occurrence_date
+        description: Earliest analysis date for the word.
+        data_tests:
+          - not_null
+      - name: last_occurrence_date
+        description: Latest analysis date for the word.
+        data_tests:
+          - not_null
+
+  - name: who_mart_top_title_topics
+    description: >
+      Twenty canonical title-word families occurring across the most distinct
+      WHO titles within each content category.
+    columns:
+      - name: topic_key
+        description: Unique identifier composed of content category and canonical topic.
+        data_tests:
+          - not_null
+          - unique
+      - name: category
+        description: WHO content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [news, statement, speech, commentary, feature_story, event, campaign]
+      - name: topic_rank
+        description: Rank by distinct-title breadth within the content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+                quote: false
+      - name: topic
+        description: Conservative canonical label for a WHO title-word family.
+        data_tests:
+          - not_null
+      - name: grouped_words
+        description: Alphabetical literal title words combined into the topic.
+        data_tests:
+          - not_null
+      - name: grouped_word_count
+        description: Number of literal title-word variants represented by the topic.
+        data_tests:
+          - not_null
+      - name: unique_title_count
+        description: Number of distinct normalized titles containing the topic.
+        data_tests:
+          - not_null
+      - name: content_count
+        description: Number of content items containing the topic after per-item deduplication.
+        data_tests:
+          - not_null
+      - name: corpus_unique_title_count
+        description: Distinct title count in the WHO content category.
+        data_tests:
+          - not_null
+      - name: corpus_content_count
+        description: Content item count in the WHO content category.
+        data_tests:
+          - not_null
+      - name: unique_title_percentage
+        description: Percentage of distinct category titles containing the topic.
+        data_tests:
+          - not_null
+      - name: content_percentage
+        description: Percentage of category content items containing the topic.
+        data_tests:
+          - not_null
+      - name: example_title
+        description: Most recently observed title containing the topic.
+        data_tests:
+          - not_null
+      - name: first_occurrence_date
+        description: Earliest analysis date for the topic.
+        data_tests:
+          - not_null
+      - name: last_occurrence_date
+        description: Latest analysis date for the topic.
+        data_tests:
+          - not_null

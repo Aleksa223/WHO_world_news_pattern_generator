@@ -4,7 +4,8 @@ config-version: 2
 
 profile: who_world_news
 
-# The existing staging folder is the model layer for this small project.
+# Staging models are grouped by source under staging/who, staging/tech, and
+# staging/economic.
 model-paths: ["staging", "intermediate", "marts"]
 clean-targets: ["target", "dbt_packages"]
 

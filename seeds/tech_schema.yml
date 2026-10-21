@@ -1,0 +1,26 @@
+version: 2
+
+seeds:
+  - name: tech_title_stopwords
+    description: Common English and Hacker News boilerplate words excluded from Tech title analysis.
+    columns:
+      - name: word
+        description: Lowercase word to exclude from Tech title metrics.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: tech_title_topic_map
+    description: >
+      Conservative Tech word-family mappings and identity rows for meaningful
+      short terms such as AI, API, LLM, GPU, and SQL.
+    columns:
+      - name: word
+        description: Lowercase title word before grouping.
+        data_tests:
+          - not_null
+          - unique
+      - name: topic
+        description: Canonical topic assigned to the word.
+        data_tests:
+          - not_null

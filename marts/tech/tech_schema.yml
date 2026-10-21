@@ -1,0 +1,244 @@
+version: 2
+
+models:
+  - name: tech_mart_daily_story_summary
+    description: Daily Hacker News story activity and engagement by feed and category.
+    columns:
+      - name: summary_key
+        description: Unique key composed of publication date, feed, and category.
+        data_tests:
+          - not_null
+          - unique
+      - name: publication_date
+        description: UTC publication date, falling back to the first-seen date.
+        data_tests:
+          - not_null
+      - name: feed
+        description: Hacker News feed from which the stories were collected.
+        data_tests:
+          - not_null
+      - name: category
+        description: Normalized technology content category.
+        data_tests:
+          - not_null
+      - name: story_count
+        description: Number of stories in the daily feed and category group.
+        data_tests:
+          - not_null
+      - name: total_score
+        description: Sum of Hacker News scores for the group.
+        data_tests:
+          - not_null
+      - name: average_score
+        description: Mean Hacker News score for the group.
+        data_tests:
+          - not_null
+      - name: total_comments
+        description: Sum of comment counts for the group.
+        data_tests:
+          - not_null
+      - name: average_comments
+        description: Mean comment count for the group.
+        data_tests:
+          - not_null
+
+  - name: tech_mart_top_stories
+    description: Ten highest-engagement Hacker News stories for each publication date.
+    columns:
+      - name: story_key
+        description: Unique key composed of publication date and Hacker News item ID.
+        data_tests:
+          - not_null
+          - unique
+      - name: publication_date
+        description: UTC publication date, falling back to the first-seen date.
+        data_tests:
+          - not_null
+      - name: story_rank
+        description: Daily rank ordered by combined score and comment count.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                quote: false
+      - name: id
+        description: Unique Hacker News item ID.
+        data_tests:
+          - not_null
+      - name: title
+        description: Story title.
+        data_tests:
+          - not_null
+      - name: url
+        description: External article URL or Hacker News discussion URL.
+        data_tests:
+          - not_null
+      - name: score
+        description: Hacker News score at the last ingestion update.
+        data_tests:
+          - not_null
+      - name: comment_count
+        description: Hacker News comment count at the last ingestion update.
+        data_tests:
+          - not_null
+      - name: engagement_score
+        description: Score plus comment count, used to rank stories.
+        data_tests:
+          - not_null
+
+  - name: tech_mart_top_title_words
+    description: >
+      Twenty literal words occurring across the most distinct Hacker News
+      story titles, with source and engagement context retained.
+    columns:
+      - name: word_key
+        description: Unique identifier composed of category and literal title word.
+        data_tests:
+          - not_null
+          - unique
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [tech]
+      - name: word_rank
+        description: Rank by distinct-title breadth, then story and source counts.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+                quote: false
+      - name: title_word
+        description: Literal normalized word extracted from story titles.
+        data_tests:
+          - not_null
+      - name: unique_title_count
+        description: Number of distinct normalized titles containing the word.
+        data_tests:
+          - not_null
+      - name: story_count
+        description: Number of Hacker News stories containing the word.
+        data_tests:
+          - not_null
+      - name: source_count
+        description: Number of distinct source domains using the word.
+        data_tests:
+          - not_null
+      - name: total_score
+        description: Combined Hacker News score for stories containing the word.
+        data_tests:
+          - not_null
+      - name: total_comments
+        description: Combined comment count for stories containing the word.
+        data_tests:
+          - not_null
+      - name: corpus_unique_title_count
+        description: Distinct normalized-title count in the Tech corpus.
+        data_tests:
+          - not_null
+      - name: corpus_story_count
+        description: Story count in the Tech corpus.
+        data_tests:
+          - not_null
+      - name: unique_title_percentage
+        description: Percentage of distinct corpus titles containing the word.
+        data_tests:
+          - not_null
+      - name: story_percentage
+        description: Percentage of corpus stories containing the word.
+        data_tests:
+          - not_null
+      - name: example_title
+        description: Most recently published title containing the word.
+        data_tests:
+          - not_null
+      - name: first_occurrence_date
+        description: Earliest publication date for the word.
+        data_tests:
+          - not_null
+      - name: last_occurrence_date
+        description: Latest publication date for the word.
+        data_tests:
+          - not_null
+
+  - name: tech_mart_top_title_topics
+    description: >
+      Twenty canonical title-word families occurring across the most distinct
+      Hacker News story titles, with grouped literal variants shown explicitly.
+    columns:
+      - name: topic_key
+        description: Unique identifier composed of category and canonical topic.
+        data_tests:
+          - not_null
+          - unique
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [tech]
+      - name: topic_rank
+        description: Rank by distinct-title breadth, then story and source counts.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+                quote: false
+      - name: topic
+        description: Conservative canonical label for a title-word family.
+        data_tests:
+          - not_null
+      - name: grouped_words
+        description: Alphabetical literal title words combined into the topic.
+        data_tests:
+          - not_null
+      - name: grouped_word_count
+        description: Number of literal title-word variants represented by the topic.
+        data_tests:
+          - not_null
+      - name: unique_title_count
+        description: Number of distinct normalized titles containing the topic.
+        data_tests:
+          - not_null
+      - name: story_count
+        description: Number of stories containing the topic after per-story deduplication.
+        data_tests:
+          - not_null
+      - name: source_count
+        description: Number of distinct source domains using the topic.
+        data_tests:
+          - not_null
+      - name: corpus_unique_title_count
+        description: Distinct normalized-title count in the Tech corpus.
+        data_tests:
+          - not_null
+      - name: corpus_story_count
+        description: Story count in the Tech corpus.
+        data_tests:
+          - not_null
+      - name: unique_title_percentage
+        description: Percentage of distinct corpus titles containing the topic.
+        data_tests:
+          - not_null
+      - name: story_percentage
+        description: Percentage of corpus stories containing the topic.
+        data_tests:
+          - not_null
+      - name: example_title
+        description: Most recently published title containing the topic.
+        data_tests:
+          - not_null
+      - name: first_occurrence_date
+        description: Earliest publication date for the topic.
+        data_tests:
+          - not_null
+      - name: last_occurrence_date
+        description: Latest publication date for the topic.
+        data_tests:
+          - not_null

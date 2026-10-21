@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-import who_news
+import who_news_scripts.who_news as who_news
 
 
 class FakeResponse:
@@ -22,7 +22,7 @@ class FakeResponse:
 
 
 class FetchNewsTests(unittest.TestCase):
-    @patch("who_news.urlopen")
+    @patch("who_news_scripts.who_news.urlopen")
     def test_fetch_news_normalizes_api_fields(self, mocked_urlopen):
         mocked_urlopen.return_value = FakeResponse(
             {
@@ -51,8 +51,8 @@ class FetchNewsTests(unittest.TestCase):
         self.assertIn("%24top=100", request.full_url)
         self.assertIn("PublicationDateAndTime+desc", request.full_url)
 
-    @patch("who_news.PAGE_SIZE", 2)
-    @patch("who_news.urlopen")
+    @patch("who_news_scripts.who_news.PAGE_SIZE", 2)
+    @patch("who_news_scripts.who_news.urlopen")
     def test_filters_news_types_and_paginates_mixed_feed(self, mocked_urlopen):
         mocked_urlopen.side_effect = [
             FakeResponse(
@@ -106,7 +106,7 @@ class FetchNewsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             who_news.fetch_news(limit=0)
 
-    @patch("who_news.urlopen")
+    @patch("who_news_scripts.who_news.urlopen")
     def test_rejects_unexpected_api_shape(self, mocked_urlopen):
         mocked_urlopen.return_value = FakeResponse({"items": []})
 
@@ -202,6 +202,44 @@ class SaveNewsTests(unittest.TestCase):
             [("1", "News release"), ("2", "Joint NEWS Release")],
         )
         self.assertEqual(raw, staged)
+
+    def test_retains_records_across_200_record_daily_batches(self):
+        def batch(first_id, fetched_at):
+            return {
+                "fetched_at": fetched_at,
+                "items": [
+                    {
+                        "id": str(article_id),
+                        "title": f"WHO news {article_id}",
+                        "news_type": "News release",
+                        "url": f"https://www.who.int/news/item/{article_id}",
+                    }
+                    for article_id in range(first_id, first_id + 200)
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "who_news.db"
+            first_result = who_news.save_news(
+                database, batch(1, "2026-10-15T06:00:00+00:00")
+            )
+            second_result = who_news.save_news(
+                database, batch(201, "2026-10-16T06:00:00+00:00")
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                raw_count = connection.execute(
+                    "SELECT COUNT(*) FROM articles"
+                ).fetchone()[0]
+                staged_count = connection.execute(
+                    "SELECT COUNT(*) FROM stg_articles"
+                ).fetchone()[0]
+
+        self.assertEqual(first_result["total"], 200)
+        self.assertEqual(second_result["inserted"], 200)
+        self.assertEqual(second_result["total"], 200)
+        self.assertEqual(second_result["staged"], 400)
+        self.assertEqual(raw_count, 400)
+        self.assertEqual(staged_count, 400)
 
 
 if __name__ == "__main__":

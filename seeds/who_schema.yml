@@ -1,0 +1,26 @@
+version: 2
+
+seeds:
+  - name: who_topic_stopwords
+    description: Common English and WHO boilerplate words excluded from title analysis.
+    columns:
+      - name: word
+        description: Lowercase word to exclude from WHO title metrics.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: who_title_topic_map
+    description: >
+      Conservative WHO word-family mappings and identity rows for meaningful
+      short public-health terms.
+    columns:
+      - name: word
+        description: Lowercase title word before grouping.
+        data_tests:
+          - not_null
+          - unique
+      - name: topic
+        description: Canonical topic assigned to the word.
+        data_tests:
+          - not_null

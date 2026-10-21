@@ -1,0 +1,348 @@
+version: 2
+
+models:
+  - name: economic_mart_daily_country_summary
+    description: >
+      Daily English-language economic article volume by source country, using
+      GDELT observation time as the reporting-date proxy.
+    columns:
+      - name: summary_key
+        description: Unique key composed of observation date, country, and category.
+        data_tests:
+          - not_null
+          - unique
+      - name: observation_date
+        description: GDELT observation date, falling back to ingestion date.
+        data_tests:
+          - not_null
+      - name: source_country
+        description: Publisher country reported by GDELT, or Unknown when unavailable.
+        data_tests:
+          - not_null
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [economic]
+      - name: article_count
+        description: Number of article copies in the date and country group.
+        data_tests:
+          - not_null
+      - name: unique_story_count
+        description: Number of distinct normalized titles in the group.
+        data_tests:
+          - not_null
+      - name: duplicate_copy_count
+        description: Article copies beyond the distinct normalized-title count.
+        data_tests:
+          - not_null
+      - name: source_count
+        description: Number of distinct source domains represented in the group.
+        data_tests:
+          - not_null
+      - name: daily_article_count
+        description: Total economic article count for the observation date.
+        data_tests:
+          - not_null
+      - name: daily_article_share_percentage
+        description: Publisher-country share of the day's economic article volume.
+        data_tests:
+          - not_null
+      - name: first_observed_at
+        description: Earliest GDELT observation timestamp in the group.
+        data_tests:
+          - not_null
+      - name: last_observed_at
+        description: Latest GDELT observation timestamp in the group.
+        data_tests:
+          - not_null
+
+  - name: economic_mart_top_sources
+    description: >
+      Ten source domains contributing the most economic articles on each
+      observation date.
+    columns:
+      - name: source_key
+        description: Unique key composed of observation date, domain, and country.
+        data_tests:
+          - not_null
+          - unique
+      - name: observation_date
+        description: GDELT observation date, falling back to ingestion date.
+        data_tests:
+          - not_null
+      - name: source_rank
+        description: Daily source rank by article count.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                quote: false
+      - name: source
+        description: Lowercase source domain.
+        data_tests:
+          - not_null
+      - name: source_country
+        description: Publisher country reported by GDELT, or Unknown when unavailable.
+        data_tests:
+          - not_null
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [economic]
+      - name: article_count
+        description: Number of articles contributed by the source that day.
+        data_tests:
+          - not_null
+      - name: daily_article_count
+        description: Total economic article count for the observation date.
+        data_tests:
+          - not_null
+      - name: article_share_percentage
+        description: Source share of the day's economic article volume.
+        data_tests:
+          - not_null
+      - name: example_title
+        description: Most recently observed title from the source that day.
+        data_tests:
+          - not_null
+      - name: first_observed_at
+        description: Earliest GDELT observation timestamp for the source that day.
+        data_tests:
+          - not_null
+      - name: last_observed_at
+        description: Latest GDELT observation timestamp for the source that day.
+        data_tests:
+          - not_null
+
+  - name: economic_mart_top_titles
+    description: >
+      Ten exact normalized titles with the most article copies on each GDELT
+      observation date. Similar but differently worded titles remain separate.
+    columns:
+      - name: title_key
+        description: Unique key composed of observation date, category, and title.
+        data_tests:
+          - not_null
+          - unique
+      - name: observation_date
+        description: GDELT observation date, falling back to ingestion date.
+        data_tests:
+          - not_null
+      - name: title_rank
+        description: Daily title rank by article-copy and source counts.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                quote: false
+      - name: title
+        description: Representative display form of the repeated title.
+        data_tests:
+          - not_null
+      - name: normalized_title
+        description: Lowercase trimmed title used for exact-match grouping.
+        data_tests:
+          - not_null
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [economic]
+      - name: article_count
+        description: Number of article copies carrying the exact title.
+        data_tests:
+          - not_null
+      - name: source_count
+        description: Number of distinct source domains carrying the exact title.
+        data_tests:
+          - not_null
+      - name: publisher_country_count
+        description: Number of distinct publisher countries carrying the title.
+        data_tests:
+          - not_null
+      - name: daily_article_count
+        description: Total economic article count for the observation date.
+        data_tests:
+          - not_null
+      - name: article_share_percentage
+        description: Exact title's share of the day's economic article copies.
+        data_tests:
+          - not_null
+      - name: example_url
+        description: URL from the representative article copy.
+        data_tests:
+          - not_null
+      - name: example_source
+        description: Domain from the representative article copy.
+        data_tests:
+          - not_null
+      - name: best_feed_rank
+        description: Lowest GDELT response position among copies, not a popularity score.
+        data_tests:
+          - not_null
+      - name: first_observed_at
+        description: Earliest GDELT observation timestamp among article copies.
+        data_tests:
+          - not_null
+      - name: last_observed_at
+        description: Latest GDELT observation timestamp among article copies.
+        data_tests:
+          - not_null
+
+  - name: economic_mart_top_title_words
+    description: >
+      Twenty literal words occurring across the most distinct economic-news
+      titles. Article-copy counts are retained to show syndication separately.
+    columns:
+      - name: word_key
+        description: Unique identifier composed of category and literal title word.
+        data_tests:
+          - not_null
+          - unique
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [economic]
+      - name: word_rank
+        description: Rank by distinct-title breadth, then article-copy and source counts.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+                quote: false
+      - name: title_word
+        description: Literal normalized word extracted from article titles.
+        data_tests:
+          - not_null
+      - name: unique_title_count
+        description: Number of distinct normalized titles containing the word.
+        data_tests:
+          - not_null
+      - name: article_count
+        description: Number of article copies containing the word.
+        data_tests:
+          - not_null
+      - name: source_count
+        description: Number of distinct source domains using the word.
+        data_tests:
+          - not_null
+      - name: corpus_unique_title_count
+        description: Distinct normalized-title count in the economic corpus.
+        data_tests:
+          - not_null
+      - name: corpus_article_count
+        description: Article-copy count in the economic corpus.
+        data_tests:
+          - not_null
+      - name: unique_title_percentage
+        description: Percentage of distinct corpus titles containing the word.
+        data_tests:
+          - not_null
+      - name: article_percentage
+        description: Percentage of corpus article copies containing the word.
+        data_tests:
+          - not_null
+      - name: example_title
+        description: Most recently observed title containing the word.
+        data_tests:
+          - not_null
+      - name: first_occurrence_date
+        description: Earliest GDELT observation date for the word.
+        data_tests:
+          - not_null
+      - name: last_occurrence_date
+        description: Latest GDELT observation date for the word.
+        data_tests:
+          - not_null
+
+  - name: economic_mart_top_title_topics
+    description: >
+      Twenty canonical title-word families occurring across the most distinct
+      economic-news titles, with grouped literal variants shown explicitly.
+    columns:
+      - name: topic_key
+        description: Unique identifier composed of category and canonical topic.
+        data_tests:
+          - not_null
+          - unique
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [economic]
+      - name: topic_rank
+        description: Rank by distinct-title breadth, then article-copy and source counts.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+                quote: false
+      - name: topic
+        description: Conservative canonical label for a title-word family.
+        data_tests:
+          - not_null
+      - name: grouped_words
+        description: Alphabetical literal title words combined into the topic.
+        data_tests:
+          - not_null
+      - name: grouped_word_count
+        description: Number of literal title-word variants represented by the topic.
+        data_tests:
+          - not_null
+      - name: unique_title_count
+        description: Number of distinct normalized titles containing the topic.
+        data_tests:
+          - not_null
+      - name: article_count
+        description: Number of article copies containing the topic after per-article deduplication.
+        data_tests:
+          - not_null
+      - name: source_count
+        description: Number of distinct source domains using the topic.
+        data_tests:
+          - not_null
+      - name: corpus_unique_title_count
+        description: Distinct normalized-title count in the economic corpus.
+        data_tests:
+          - not_null
+      - name: corpus_article_count
+        description: Article-copy count in the economic corpus.
+        data_tests:
+          - not_null
+      - name: unique_title_percentage
+        description: Percentage of distinct corpus titles containing the topic.
+        data_tests:
+          - not_null
+      - name: article_percentage
+        description: Percentage of corpus article copies containing the topic.
+        data_tests:
+          - not_null
+      - name: example_title
+        description: Most recently observed title containing the topic.
+        data_tests:
+          - not_null
+      - name: first_occurrence_date
+        description: Earliest GDELT observation date for the topic.
+        data_tests:
+          - not_null
+      - name: last_occurrence_date
+        description: Latest GDELT observation date for the topic.
+        data_tests:
+          - not_null

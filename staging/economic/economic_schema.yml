@@ -1,0 +1,103 @@
+version: 2
+
+models:
+  - name: economic_stg_articles
+    description: >
+      English-language GDELT economic articles prepared for downstream
+      intermediate models and marts.
+    columns:
+      - name: id
+        description: Stable article identifier derived from the canonical URL.
+        data_tests:
+          - not_null
+          - unique
+      - name: provider
+        description: Upstream metadata provider.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [GDELT]
+      - name: item_type
+        description: Normalized content type.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [article]
+      - name: title
+        description: English display title used by downstream models.
+        data_tests:
+          - not_null
+      - name: title_original
+        description: Title exactly as normalized from the source response.
+        data_tests:
+          - not_null
+      - name: title_english
+        description: English title, equal to the source title for English articles.
+        data_tests:
+          - not_null
+      - name: translation_source_language
+        description: ISO language code associated with the English title workflow.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [en]
+      - name: translation_status
+        description: Whether the source title was already English or was translated.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [original_english, translated]
+      - name: url
+        description: Canonical article URL.
+        data_tests:
+          - not_null
+          - unique
+      - name: language
+        description: Lowercase GDELT source-language label.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [english]
+      - name: published_at
+        description: GDELT observation time used as the publication-time proxy.
+        data_tests:
+          - not_null
+      - name: source
+        description: Lowercase source domain.
+        data_tests:
+          - not_null
+      - name: feed
+        description: Normalized ingestion feed name.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [gdelt_doc]
+      - name: feed_rank
+        description: Position in the GDELT response at ingestion time.
+        data_tests:
+          - not_null
+      - name: query
+        description: Effective GDELT query, including the English-language filter.
+        data_tests:
+          - not_null
+      - name: category
+        description: Normalized project content category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [economic]
+      - name: first_seen_at
+        description: First ingestion timestamp for the canonical article URL.
+        data_tests:
+          - not_null
+      - name: last_seen_at
+        description: Most recent ingestion timestamp for the canonical article URL.
+        data_tests:
+          - not_null
