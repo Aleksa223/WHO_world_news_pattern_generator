@@ -25,8 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      RESTORED_STATE_DIRECTORY: ${{ runner.temp }}/restored-raw-sqlite-state
-      PUBLISHED_STATE_DIRECTORY: ${{ runner.temp }}/published-raw-sqlite-state
+      RESTORED_STATE_DIRECTORY: /tmp/restored-raw-sqlite-state
+      PUBLISHED_STATE_DIRECTORY: /tmp/published-raw-sqlite-state
 
     steps:
       - name: Check out the default branch
