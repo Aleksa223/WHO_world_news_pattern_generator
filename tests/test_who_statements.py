@@ -73,6 +73,41 @@ class FetchStatementsTests(unittest.TestCase):
         self.assertIn("%24skip=2", second_request.full_url)
         self.assertNotIn("%24filter", first_request.full_url)
 
+    @patch("who_news_scripts.who_statements.PAGE_SIZE", 2)
+    @patch("who_news_scripts.who_statements.urlopen")
+    def test_skips_stored_ids_and_pages_until_it_finds_new_statement(
+        self, mocked_urlopen
+    ):
+        mocked_urlopen.side_effect = [
+            FakeResponse(
+                {
+                    "value": [
+                        api_item("known-1", "Known one", "Statement"),
+                        api_item("known-2", "Known two", "Statement"),
+                    ]
+                }
+            ),
+            FakeResponse(
+                {"value": [api_item("new-1", "New one", "Statement")]}
+            ),
+        ]
+
+        result = who_statements.fetch_statements(
+            limit=1,
+            existing_ids={"known-1", "known-2"},
+        )
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["known-1", "new-1"],
+        )
+        self.assertEqual(result["unseen_count"], 1)
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(result["existing_encountered"], 2)
+        self.assertEqual(result["skipped_existing"], 1)
+        self.assertEqual(result["scanned"], 3)
+        self.assertEqual(mocked_urlopen.call_count, 2)
+
     def test_rejects_invalid_limit(self):
         with self.assertRaises(ValueError):
             who_statements.fetch_statements(limit=0)

@@ -21,6 +21,19 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
+if __package__:
+    from .incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+else:  # Support ``python who_news_scripts/who_speeches.py``.
+    from incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+
 
 WHO_BASE_URL = "https://www.who.int"
 WHO_SPEECHES_API_URL = f"{WHO_BASE_URL}/api/hubs/speeches"
@@ -30,6 +43,7 @@ SITE_ID = "15210d59-ad60-47ff-a542-7ed76645f0c7"
 DEFAULT_TIMEOUT = 30
 PAGE_SIZE = 100
 MAX_SPEECHES = 1000
+MAX_SCANNED_ITEMS = 20_000
 DEFAULT_DATABASE = Path("articles/who_speech_news.db")
 
 
@@ -104,39 +118,46 @@ def _fetch_page(skip: int, top: int, timeout: int) -> list[dict[str, Any]]:
 
 
 def fetch_speeches(
-    limit: int = 10, timeout: int = DEFAULT_TIMEOUT
+    limit: int = 10,
+    timeout: int = DEFAULT_TIMEOUT,
+    existing_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Fetch the newest WHO Speeches, following API pagination."""
+    """Fetch unseen WHO Speeches, following API pagination."""
     if not 1 <= limit <= MAX_SPEECHES:
         raise ValueError(f"limit must be between 1 and {MAX_SPEECHES}")
     if timeout <= 0:
         raise ValueError("timeout must be greater than zero")
 
-    speeches: list[dict[str, Any]] = []
+    batch = IncrementalBatch[dict[str, Any]](limit, existing_ids)
     scanned = 0
+    exhausted = False
 
-    while len(speeches) < limit:
-        page_size = min(PAGE_SIZE, limit - len(speeches))
+    while batch.needs_unseen and scanned < MAX_SCANNED_ITEMS:
+        page_size = min(PAGE_SIZE, MAX_SCANNED_ITEMS - scanned)
         page = _fetch_page(skip=scanned, top=page_size, timeout=timeout)
         scanned += len(page)
 
         for item in page:
             normalized = _normalize_item(item)
             if normalized["id"] and normalized["title"]:
-                speeches.append(normalized)
-                if len(speeches) == limit:
+                batch.consider(normalized, normalized["id"])
+                if not batch.needs_unseen:
                     break
 
         if len(page) < page_size:
+            exhausted = True
             break
 
     return {
         "source": WHO_SPEECHES_API_URL,
         "speech_type": SPEECH_TYPE,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "count": len(speeches),
+        **batch.metadata(),
         "scanned": scanned,
-        "items": speeches,
+        "scan_limit_reached": (
+            not exhausted and scanned >= MAX_SCANNED_ITEMS and batch.needs_unseen
+        ),
+        "items": batch.items,
     }
 
 
@@ -329,7 +350,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            data = fetch_speeches(limit=args.limit, timeout=args.timeout)
+            existing_ids = load_existing_ids(args.database, "speeches")
+            data = fetch_speeches(
+                limit=args.limit,
+                timeout=args.timeout,
+                existing_ids=existing_ids,
+            )
             saved = save_speeches(args.database, data)
             print(
                 f"Database {args.database}: {saved['inserted']} inserted, "
@@ -337,11 +363,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"({data['scanned']} Speeches scanned)",
                 file=sys.stderr,
             )
+            if data["scan_limit_reached"]:
+                print(
+                    "warning: scan limit reached before the requested number "
+                    "of unseen Speeches was found",
+                    file=sys.stderr,
+                )
             _write_json(data, args.output)
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except WhoSpeechesError as exc:
+    except (WhoSpeechesError, IncrementalStateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

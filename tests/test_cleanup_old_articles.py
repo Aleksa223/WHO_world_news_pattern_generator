@@ -8,6 +8,7 @@ from pathlib import Path
 from maintenance_scripts.cleanup_old_articles import (
     DEFAULT_RETENTION_DAYS,
     RETENTION_TARGETS,
+    WHO_NEWS_RETENTION_DAYS,
     RetentionError,
     RetentionTarget,
     calculate_cutoff,
@@ -50,12 +51,22 @@ class CleanupOldArticlesTests(unittest.TestCase):
         self.assertTrue(
             all(target.date_column == "published_at" for target in RETENTION_TARGETS)
         )
+        self.assertEqual(
+            {target.name: target.retention_days for target in RETENTION_TARGETS},
+            {
+                "who_news": 365,
+                "tech_news": 90,
+                "economic_news": 90,
+            },
+        )
 
-    def test_deletes_only_rows_strictly_older_than_90_days(self):
+    def test_applies_who_one_year_and_other_sources_ninety_days(self):
         rows = [
-            ("old", "2026-07-18T11:59:59Z"),
-            ("old-offset", "2026-07-18T13:59:59+02:00"),
-            ("boundary", "2026-07-18T12:00:00+00:00"),
+            ("older-than-year", "2025-10-16T11:59:59Z"),
+            ("year-boundary", "2025-10-16T12:00:00+00:00"),
+            ("between-90-and-365", "2026-01-01T00:00:00Z"),
+            ("older-than-90-offset", "2026-07-18T13:59:59+02:00"),
+            ("ninety-day-boundary", "2026-07-18T12:00:00Z"),
             ("new", "2026-07-18T12:00:01Z"),
             ("missing", None),
             ("invalid", "not-a-date"),
@@ -80,20 +91,72 @@ class CleanupOldArticlesTests(unittest.TestCase):
                         )
                     }
 
-        self.assertEqual(report["retention_days"], 90)
-        self.assertEqual(report["cutoff_utc"], "2026-07-18T12:00:00Z")
-        self.assertEqual(report["eligible_total"], 6)
-        self.assertEqual(report["deleted_total"], 6)
-        for result in report["databases"]:
-            self.assertEqual(result["eligible"], 2)
-            self.assertEqual(result["deleted"], 2)
-            self.assertEqual(result["remaining"], 4)
-            self.assertEqual(result["invalid_or_missing_dates"], 2)
-        for retained in retained_by_database.values():
+        self.assertIsNone(report["retention_days_override"])
+        self.assertEqual(report["eligible_total"], 9)
+        self.assertEqual(report["deleted_total"], 9)
+
+        results = {result["name"]: result for result in report["databases"]}
+        self.assertEqual(results["who_news"]["retention_days"], 365)
+        self.assertEqual(
+            results["who_news"]["cutoff_utc"],
+            "2025-10-16T12:00:00Z",
+        )
+        self.assertEqual(results["who_news"]["eligible"], 1)
+        self.assertEqual(results["who_news"]["deleted"], 1)
+        self.assertEqual(results["who_news"]["remaining"], 7)
+
+        for name in ("tech_news", "economic_news"):
+            self.assertEqual(results[name]["retention_days"], 90)
             self.assertEqual(
-                retained,
-                {"boundary", "new", "missing", "invalid"},
+                results[name]["cutoff_utc"],
+                "2026-07-18T12:00:00Z",
             )
+            self.assertEqual(results[name]["eligible"], 4)
+            self.assertEqual(results[name]["deleted"], 4)
+            self.assertEqual(results[name]["remaining"], 4)
+
+        for result in report["databases"]:
+            self.assertEqual(result["invalid_or_missing_dates"], 2)
+
+        self.assertEqual(
+            retained_by_database["who_news"],
+            {
+                "year-boundary",
+                "between-90-and-365",
+                "older-than-90-offset",
+                "ninety-day-boundary",
+                "new",
+                "missing",
+                "invalid",
+            },
+        )
+        for name in ("tech_news", "economic_news"):
+            self.assertEqual(
+                retained_by_database[name],
+                {"ninety-day-boundary", "new", "missing", "invalid"},
+            )
+
+    def test_explicit_retention_override_applies_to_every_target(self):
+        rows = [
+            ("old", "2026-09-15T23:59:59Z"),
+            ("boundary", "2026-09-16T12:00:00Z"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            for target in RETENTION_TARGETS:
+                create_target_database(project_root, target, rows)
+
+            report = cleanup_old_articles(
+                project_root,
+                as_of=AS_OF,
+                retention_days=30,
+            )
+
+        self.assertEqual(report["retention_days_override"], 30)
+        self.assertEqual(report["eligible_total"], 3)
+        for result in report["databases"]:
+            self.assertEqual(result["retention_days"], 30)
+            self.assertEqual(result["cutoff_utc"], "2026-09-16T12:00:00Z")
 
     def test_dry_run_reports_candidates_without_deleting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -172,6 +235,7 @@ class CleanupOldArticlesTests(unittest.TestCase):
 
     def test_rejects_non_positive_retention_periods(self):
         self.assertEqual(DEFAULT_RETENTION_DAYS, 90)
+        self.assertEqual(WHO_NEWS_RETENTION_DAYS, 365)
         self.assertEqual(
             calculate_cutoff(as_of=AS_OF),
             datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc),

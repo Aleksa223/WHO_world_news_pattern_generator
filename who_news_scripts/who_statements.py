@@ -21,6 +21,19 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+if __package__:
+    from .incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+else:  # Support ``python who_news_scripts/who_statements.py``.
+    from incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+
 
 WHO_API_URL = "https://www.who.int/api/news/newsitems"
 WHO_NEWS_ITEM_URL = "https://www.who.int/news/item/"
@@ -100,27 +113,31 @@ def _fetch_page(skip: int, top: int, timeout: int) -> list[dict[str, Any]]:
 
 
 def fetch_statements(
-    limit: int = 10, timeout: int = DEFAULT_TIMEOUT
+    limit: int = 10,
+    timeout: int = DEFAULT_TIMEOUT,
+    existing_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Fetch the newest WHO Statements from the mixed newsroom feed."""
+    """Fetch WHO Statements not already present in the destination."""
     if not 1 <= limit <= MAX_STATEMENTS:
         raise ValueError(f"limit must be between 1 and {MAX_STATEMENTS}")
     if timeout <= 0:
         raise ValueError("timeout must be greater than zero")
 
-    statements: list[dict[str, Any]] = []
+    batch = IncrementalBatch[dict[str, Any]](limit, existing_ids)
     scanned = 0
     exhausted = False
 
-    while len(statements) < limit and scanned < MAX_SCANNED_ITEMS:
+    while batch.needs_unseen and scanned < MAX_SCANNED_ITEMS:
         page_size = min(PAGE_SIZE, MAX_SCANNED_ITEMS - scanned)
         page = _fetch_page(skip=scanned, top=page_size, timeout=timeout)
         scanned += len(page)
 
         for item in page:
             if _is_statement(item):
-                statements.append(_normalize_item(item))
-                if len(statements) == limit:
+                normalized = _normalize_item(item)
+                item_id = normalized.get("id")
+                batch.consider(normalized, item_id)
+                if not batch.needs_unseen:
                     break
 
         if len(page) < page_size:
@@ -131,14 +148,14 @@ def fetch_statements(
         "source": WHO_API_URL,
         "news_type": STATEMENT_NEWS_TYPE,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "count": len(statements),
+        **batch.metadata(),
         "scanned": scanned,
         "scan_limit_reached": (
             not exhausted
             and scanned >= MAX_SCANNED_ITEMS
-            and len(statements) < limit
+            and batch.needs_unseen
         ),
-        "items": statements,
+        "items": batch.items,
     }
 
 
@@ -310,7 +327,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            data = fetch_statements(limit=args.limit, timeout=args.timeout)
+            existing_ids = load_existing_ids(args.database, "statements")
+            data = fetch_statements(
+                limit=args.limit,
+                timeout=args.timeout,
+                existing_ids=existing_ids,
+            )
             saved = save_statements(args.database, data)
             print(
                 f"Database {args.database}: {saved['inserted']} inserted, "
@@ -328,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except WhoStatementsError as exc:
+    except (WhoStatementsError, IncrementalStateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

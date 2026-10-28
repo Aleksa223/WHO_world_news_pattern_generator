@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 # This is the API batch size for each daily task, not a database retention cap.
-# Fetchers upsert these batches into cumulative SQLite tables.
+# Fetchers upsert into cumulative tables; the DAG applies retention separately.
 DAILY_FETCH_LIMIT = 200
 
 

@@ -13,11 +13,13 @@ library, so no package installation is required to run them.
 python who_news_scripts/who_news.py
 ```
 
-By default, the latest 10 records whose `news_type` contains `news`
+By default, up to 10 records whose `news_type` contains `news`
 (case-insensitive) are printed as JSON and stored in the local SQLite database
-`articles/who_news.db`. The pipeline pages through the mixed WHO newsroom feed
-until it has collected the requested number of matching records. Repeated runs
-update existing records by WHO article ID, so they do not create duplicates.
+`articles/who_news.db`. A first run starts with the newest records. Later runs
+read the IDs already stored, page past them, and collect the next unseen batch.
+WHO article IDs and SQLite upserts prevent duplicates, so the database can grow
+beyond the per-run limit. The scheduled pipeline later applies the documented
+one-year retention policy to the general WHO news table.
 
 The database has two layers:
 
@@ -76,6 +78,7 @@ The saved structure is:
   "fetched_at": "2026-09-10T15:00:00+00:00",
   "count": 1,
   "scanned": 1,
+  "skipped_existing": 0,
   "scan_limit_reached": false,
   "items": [
     {
@@ -90,9 +93,11 @@ The saved structure is:
 }
 ```
 
-The endpoint is live rather than a streaming feed: each run asks WHO for the
-newest published records. `--watch` provides polling when a continuously
-updated database and local file are needed.
+The endpoint is live rather than a streaming feed. Each run starts at WHO's
+newest records, refreshes a bounded set of IDs already in the destination, and
+continues until it has found the requested unseen batch or exhausted the
+available source data. `--watch` repeats that incremental process on the
+configured interval.
 
 ## Fetch WHO Statements
 
@@ -105,9 +110,10 @@ python who_news_scripts/who_statements.py --limit 200 --output articles/who_late
 ```
 
 The database contains a raw `statements` table and a filtered
-`stg_statements` view. Repeated runs update existing WHO IDs instead of
-creating duplicates. The command also supports `--database`, `--timeout`, and
-`--watch` in the same way as the general news pipeline.
+`stg_statements` view. Repeated runs refresh encountered WHO IDs and page to
+the next unseen statements without creating duplicates. The command also
+supports `--database`, `--timeout`, and `--watch` in the same way as the
+general news pipeline.
 
 ## Fetch WHO Campaigns
 
@@ -187,9 +193,12 @@ require a token. Run the fetcher from the project root:
 python tech_news_scripts/tech_news.py --output tech_articles/tech_news.json
 ```
 
-The default request retrieves 200 items from the `newstories` feed and stores
-them in `tech_articles/tech_news.db`. Records are upserted by Hacker News item
-ID into the `tech_articles` table and exposed through the
+The default request retrieves up to 200 unseen items from the current
+`newstories` feed and refreshes up to 200 stored stories still present there.
+It stores them in `tech_articles/tech_news.db`, allowing repeated runs to move
+deeper through the feed while keeping mutable scores, comment counts, titles,
+and feed ranks current. Records are upserted by Hacker News item ID into the
+`tech_articles` table and exposed through the
 `stg_tech_articles` view. Stored fields include the article and discussion
 URLs, author, publication time, score, and comment count. Self-posts without an
 external URL use their Hacker News discussion URL.
@@ -348,13 +357,15 @@ identifies the stream, `content_type` identifies the source record kind, and
 
 The mart does not collapse similar headlines across publishers. It preserves
 the source records and their URLs, while the existing source ingestion prevents
-duplicate IDs or canonical URLs within each raw database. `fetched_at` means
-the latest fetch that observed a record and is therefore equal to
-`last_seen_at`. WHO campaigns may have no publication date, and GDELT's
+duplicate IDs or canonical URLs within each raw database. `fetched_at` and
+`last_seen_at` identify the most recent ingestion that wrote a row; incremental
+WHO and Hacker News scans do not rewrite IDs they skip as already stored. WHO
+campaigns may have no publication date, and GDELT's
 `published_at` value is an observation-time proxy; use `observation_date` for
-a consistently populated reporting date. The 90-day cleanup covers WHO news,
-Tech stories, and economic articles; the other WHO content types can therefore
-contain older records in this combined mart.
+a consistently populated reporting date. The scheduled retention policy keeps
+general WHO news for 365 days and Hacker News stories plus economic articles
+for 90 days. The other WHO content types can therefore contain older records
+in this combined mart.
 
 Build this mart together with its upstream models and tests:
 
@@ -380,22 +391,25 @@ intermediate, mart, and seed resources and their tests, refreshing
 `warehouse/analytics.db`. A failed fetch is retried twice and prevents dbt from
 building a partial daily refresh.
 
-Every fetch task requests up to 200 records per daily run. This is only the
-request batch size; it is not a 200-row database limit. Each raw SQLite database
-keeps previously fetched records, inserts new IDs or URLs, and updates repeated
-ones, so it can grow well beyond 200 rows. A source may add fewer than 200 new
-rows when results overlap, fail validation, or the upstream API returns fewer
-items. The JSON output files are latest-run snapshots and are overwritten on
-the next run; cumulative history is stored in SQLite.
+Every fetch task requests a batch of up to 200 unseen records per daily run.
+This is not a 200-row database limit. WHO and Hacker News also refresh a
+bounded set of stored records encountered in the current source, keeping
+mutable metadata current while they continue paging for unseen IDs. Every raw
+SQLite database retains earlier rows and deduplicates by its source ID or
+canonical URL, so it can grow well beyond 200 rows without storing duplicates.
+A source may add fewer than 200 rows when its current feed is exhausted, an
+item fails validation, or no unseen source records exist. The JSON output files
+are latest-run snapshots and are overwritten on the next run; retained history
+is stored in SQLite.
 
-After fetching, Airflow applies a 90-day retention policy to the three article
-databases: `articles/who_news.db`, `tech_articles/tech_news.db`, and
-`economic_articles/economic_news.db`. Rows whose `published_at` timestamp is
-strictly older than the current UTC time minus 90 days are deleted before dbt
-is built. A row exactly on the cutoff is retained. Missing or invalid dates are
-also retained and reported rather than guessed. The campaign, event, speech,
-statement, commentary, and feature-story databases are not included because
-they do not all share the same publication-date semantics.
+After every scheduled fetch, Airflow deletes general WHO news older than 365
+days and Hacker News stories or economic articles older than 90 days before
+rebuilding dbt. Each database receives its own cutoff. A row exactly on its
+cutoff is retained, as are rows with missing or invalid dates. Campaigns,
+events, speeches, statements, commentaries, and feature stories are not cleaned
+automatically because their date semantics are not all equivalent. The
+incremental fetch can briefly re-ingest an older upstream record, but the same
+DAG run removes it before refreshing `warehouse/analytics.db`.
 
 Preview the cleanup without deleting anything:
 
@@ -409,8 +423,12 @@ Run the same cleanup manually with:
 python maintenance_scripts/cleanup_old_articles.py
 ```
 
+Passing `--retention-days N` is an explicit override that applies `N` days to
+all three cleaned databases. Without that option, the source-specific 365/90
+day policy above is used.
+
 SQLite reuses pages freed by deletion, so the database file may not immediately
-become smaller on disk. The daily task intentionally does not run `VACUUM`.
+become smaller on disk. Neither the scheduled nor manual cleanup runs `VACUUM`.
 
 ### Run while your computer is off with GitHub Actions
 

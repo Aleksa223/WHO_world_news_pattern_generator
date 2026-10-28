@@ -23,6 +23,19 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
+if __package__:
+    from .incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+else:  # Support ``python who_news_scripts/who_events.py``.
+    from incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+
 
 WHO_BASE_URL = "https://www.who.int"
 WHO_EVENTS_URL = f"{WHO_BASE_URL}/news-room/events"
@@ -160,19 +173,25 @@ def _fetch_page(page_number: int, timeout: int) -> str:
         raise WhoEventsError("WHO returned an invalid text response") from exc
 
 
-def fetch_events(limit: int = 10, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    """Fetch WHO event titles, following listing pagination as needed."""
+def fetch_events(
+    limit: int = 10,
+    timeout: int = DEFAULT_TIMEOUT,
+    existing_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """Fetch unseen WHO events, following listing pagination as needed."""
     if not 1 <= limit <= MAX_EVENTS:
         raise ValueError(f"limit must be between 1 and {MAX_EVENTS}")
     if timeout <= 0:
         raise ValueError("timeout must be greater than zero")
 
-    unique: dict[str, dict[str, str]] = {}
+    batch = IncrementalBatch[dict[str, str]](limit, existing_ids)
     page_number = 1
     last_page = 1
+    pages_scanned = 0
 
     while page_number <= last_page and page_number <= MAX_EVENT_PAGES:
         page = _fetch_page(page_number, timeout)
+        pages_scanned += 1
         events, page_numbers = _parse_events(page)
         if page_number == 1 and not events:
             raise WhoEventsError("WHO events page contained no event cards")
@@ -180,23 +199,22 @@ def fetch_events(limit: int = 10, timeout: int = DEFAULT_TIMEOUT) -> dict[str, A
             last_page = min(max(page_numbers), MAX_EVENT_PAGES)
 
         for event in events:
-            unique.setdefault(event["id"], event)
-            if len(unique) >= limit:
+            batch.consider(event, event["id"])
+            if not batch.needs_unseen:
                 break
 
-        if len(unique) >= limit:
+        if not batch.needs_unseen:
             break
         page_number += 1
 
-    selected = list(unique.values())[:limit]
     return {
         "source": WHO_EVENTS_URL,
         "event_type": EVENT_TYPE,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "count": len(selected),
-        "scanned": len(unique),
-        "pages_scanned": page_number,
-        "items": selected,
+        **batch.metadata(),
+        "scanned": batch.encountered_count,
+        "pages_scanned": pages_scanned,
+        "items": batch.items,
     }
 
 
@@ -370,7 +388,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            data = fetch_events(limit=args.limit, timeout=args.timeout)
+            existing_ids = load_existing_ids(args.database, "events")
+            data = fetch_events(
+                limit=args.limit,
+                timeout=args.timeout,
+                existing_ids=existing_ids,
+            )
             saved = save_events(args.database, data)
             print(
                 f"Database {args.database}: {saved['inserted']} inserted, "
@@ -382,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except WhoEventsError as exc:
+    except (WhoEventsError, IncrementalStateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

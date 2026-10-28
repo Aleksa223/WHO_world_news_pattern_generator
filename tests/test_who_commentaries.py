@@ -70,6 +70,64 @@ class FetchCommentariesTests(unittest.TestCase):
         self.assertIn("%24skip=0", first_request.full_url)
         self.assertIn("%24skip=2", second_request.full_url)
 
+    @patch("who_news_scripts.who_commentaries.PAGE_SIZE", 2)
+    @patch("who_news_scripts.who_commentaries.urlopen")
+    def test_skips_stored_ids_and_pages_until_it_finds_new_commentary(
+        self, mocked_urlopen
+    ):
+        mocked_urlopen.side_effect = [
+            FakeResponse(
+                {
+                    "value": [
+                        api_item("known-1", "Known one"),
+                        api_item("known-2", "Known two"),
+                    ]
+                }
+            ),
+            FakeResponse({"value": [api_item("new-1", "New one")]}),
+        ]
+
+        result = who_commentaries.fetch_commentaries(
+            limit=1,
+            existing_ids={"known-1", "known-2"},
+        )
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["known-1", "new-1"],
+        )
+        self.assertEqual(result["unseen_count"], 1)
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(result["existing_encountered"], 2)
+        self.assertEqual(result["skipped_existing"], 1)
+        self.assertEqual(result["scanned"], 3)
+        self.assertEqual(mocked_urlopen.call_count, 2)
+
+    @patch("who_news_scripts.who_commentaries.MAX_SCANNED_ITEMS", 4)
+    @patch("who_news_scripts.who_commentaries.PAGE_SIZE", 2)
+    @patch("who_news_scripts.who_commentaries.urlopen")
+    def test_stops_at_scan_ceiling_when_full_pages_have_no_unseen_items(
+        self, mocked_urlopen
+    ):
+        payload = {
+            "value": [
+                api_item("known-1", "Known one"),
+                api_item("known-2", "Known two"),
+            ]
+        }
+        mocked_urlopen.side_effect = [FakeResponse(payload), FakeResponse(payload)]
+
+        result = who_commentaries.fetch_commentaries(
+            limit=1,
+            existing_ids={"known-1", "known-2"},
+        )
+
+        self.assertTrue(result["scan_limit_reached"])
+        self.assertEqual(result["scanned"], 4)
+        self.assertEqual(result["unseen_count"], 0)
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(mocked_urlopen.call_count, 2)
+
     def test_rejects_invalid_limit(self):
         with self.assertRaises(ValueError):
             who_commentaries.fetch_commentaries(limit=0)

@@ -62,6 +62,32 @@ class FetchCampaignsTests(unittest.TestCase):
             "https://www.who.int/campaigns/world-health-day",
         )
 
+    @patch("who_news_scripts.who_campaigns.urlopen")
+    def test_skips_stored_campaigns_when_selecting_the_next_batch(
+        self, mocked_urlopen
+    ):
+        page = f"""
+        <html><body>
+          {campaign_card('/campaigns/known', 'Known campaign')}
+          {campaign_card('/campaigns/new', 'New campaign')}
+        </body></html>
+        """
+        mocked_urlopen.return_value = FakeResponse(page)
+
+        result = who_campaigns.fetch_campaigns(
+            limit=1,
+            existing_ids={"known"},
+        )
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["known", "new"],
+        )
+        self.assertEqual(result["unseen_count"], 1)
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(result["existing_encountered"], 1)
+        self.assertEqual(result["skipped_existing"], 0)
+
     def test_rejects_invalid_limit(self):
         with self.assertRaises(ValueError):
             who_campaigns.fetch_campaigns(limit=0)

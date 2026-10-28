@@ -205,6 +205,56 @@ class FetchTechNewsTests(unittest.TestCase):
         self.assertTrue(result["exhausted"])
 
     @patch("tech_news_scripts.tech_news.urlopen")
+    def test_fetches_unseen_and_bounded_existing_stories(
+        self, mocked_urlopen
+    ):
+        story_ids = [1, 2, 3, 4, 5]
+
+        def response_for(request, timeout):
+            if request.full_url == tech_news.HACKER_NEWS_FEED_URL:
+                return FakeResponse(story_ids)
+            item_id = int(request.full_url.rsplit("/", 1)[1].split(".", 1)[0])
+            return FakeResponse(hn_item(item_id))
+
+        mocked_urlopen.side_effect = response_for
+        result = tech_news.fetch_tech_news(
+            limit=2,
+            workers=1,
+            existing_ids={"1", "2", "5"},
+        )
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["1", "2", "3", "4"],
+        )
+        self.assertEqual(
+            [item["feed_rank"] for item in result["items"]], [1, 2, 3, 4]
+        )
+        self.assertEqual(result["available"], 5)
+        self.assertEqual(result["unseen_available"], 2)
+        self.assertEqual(result["existing_available"], 3)
+        self.assertEqual(result["new_count"], 2)
+        self.assertEqual(result["refreshed_count"], 2)
+        self.assertEqual(result["refresh_selected"], 2)
+        self.assertEqual(result["refresh_skipped"], 1)
+        self.assertEqual(result["unseen_scanned"], 2)
+        self.assertEqual(result["refresh_scanned"], 2)
+        self.assertEqual(result["scanned"], 4)
+        self.assertFalse(result["exhausted"])
+        requested_urls = [
+            call.args[0].full_url for call in mocked_urlopen.call_args_list
+        ]
+        self.assertIn(
+            tech_news.HACKER_NEWS_ITEM_URL.format(item_id=1), requested_urls
+        )
+        self.assertIn(
+            tech_news.HACKER_NEWS_ITEM_URL.format(item_id=2), requested_urls
+        )
+        self.assertNotIn(
+            tech_news.HACKER_NEWS_ITEM_URL.format(item_id=5), requested_urls
+        )
+
+    @patch("tech_news_scripts.tech_news.urlopen")
     def test_reports_hacker_news_http_error(self, mocked_urlopen):
         mocked_urlopen.side_effect = HTTPError(
             url=tech_news.HACKER_NEWS_FEED_URL,
@@ -221,6 +271,101 @@ class FetchTechNewsTests(unittest.TestCase):
 
 
 class SaveTechNewsTests(unittest.TestCase):
+    @patch("tech_news_scripts.tech_news.urlopen")
+    def test_repeated_fetches_accumulate_unseen_stories(self, mocked_urlopen):
+        story_ids = [1, 2, 3, 4, 5]
+
+        def response_for(request, timeout):
+            if request.full_url == tech_news.HACKER_NEWS_FEED_URL:
+                return FakeResponse(story_ids)
+            item_id = int(
+                request.full_url.rsplit("/", 1)[1].split(".", 1)[0]
+            )
+            return FakeResponse(hn_item(item_id))
+
+        mocked_urlopen.side_effect = response_for
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tech_news.db"
+            batch_sizes = []
+            for _ in range(3):
+                data = tech_news.fetch_tech_news(
+                    limit=2,
+                    workers=1,
+                    existing_ids=tech_news.load_existing_ids(database),
+                )
+                result = tech_news.save_tech_news(database, data)
+                batch_sizes.append(result["inserted"])
+
+            with closing(sqlite3.connect(database)) as connection:
+                stored_ids = [
+                    row[0]
+                    for row in connection.execute(
+                        """
+                        SELECT id
+                        FROM tech_articles
+                        ORDER BY CAST(id AS INTEGER)
+                        """
+                    )
+                ]
+
+        self.assertEqual(batch_sizes, [2, 2, 1])
+        self.assertEqual(stored_ids, ["1", "2", "3", "4", "5"])
+
+    @patch("tech_news_scripts.tech_news.urlopen")
+    def test_refreshes_scores_while_accumulating_new_stories(
+        self, mocked_urlopen
+    ):
+        story_ids = [1, 2, 3]
+
+        def response_for(request, timeout):
+            if request.full_url == tech_news.HACKER_NEWS_FEED_URL:
+                return FakeResponse(story_ids)
+            item_id = int(request.full_url.rsplit("/", 1)[1].split(".", 1)[0])
+            if item_id == 1:
+                return FakeResponse(
+                    hn_item(1, score=99, descendants=42, title="Updated")
+                )
+            return FakeResponse(hn_item(item_id))
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tech_news.db"
+            tech_news.save_tech_news(
+                database,
+                {
+                    "fetched_at": "2026-10-09T10:00:00+00:00",
+                    "items": [
+                        saved_item(1, score=1, comment_count=2, title="Old")
+                    ],
+                },
+            )
+            mocked_urlopen.side_effect = response_for
+            data = tech_news.fetch_tech_news(
+                limit=2,
+                workers=1,
+                existing_ids=tech_news.load_existing_ids(database),
+            )
+            result = tech_news.save_tech_news(database, data)
+
+            with closing(sqlite3.connect(database)) as connection:
+                refreshed = connection.execute(
+                    """
+                    SELECT title, score, comment_count, feed_rank
+                    FROM tech_articles
+                    WHERE id = '1'
+                    """
+                ).fetchone()
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM tech_articles"
+                ).fetchone()[0]
+
+        self.assertEqual(result["inserted"], 2)
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(count, 3)
+        self.assertEqual(refreshed, ("Updated", 99, 42, 1))
+        self.assertEqual(data["new_count"], 2)
+        self.assertEqual(data["refreshed_count"], 1)
+
     def test_inserts_then_updates_hacker_news_fields(self):
         first_fetch = {
             "fetched_at": "2026-10-09T10:00:00+00:00",
@@ -412,9 +557,11 @@ class TechNewsCliTests(unittest.TestCase):
     @patch("tech_news_scripts.tech_news._write_json")
     @patch("tech_news_scripts.tech_news.save_tech_news")
     @patch("tech_news_scripts.tech_news.fetch_tech_news")
+    @patch("tech_news_scripts.tech_news.load_existing_ids")
     def test_cli_runs_without_an_api_token(
-        self, mocked_fetch, mocked_save, mocked_write
+        self, mocked_load_ids, mocked_fetch, mocked_save, mocked_write
     ):
+        mocked_load_ids.return_value = {"already-stored"}
         mocked_fetch.return_value = {
             "count": 1,
             "scanned": 1,
@@ -438,6 +585,7 @@ class TechNewsCliTests(unittest.TestCase):
             limit=200,
             timeout=tech_news.DEFAULT_TIMEOUT,
             workers=tech_news.DEFAULT_WORKERS,
+            existing_ids={"already-stored"},
         )
         mocked_save.assert_called_once()
         self.assertEqual(

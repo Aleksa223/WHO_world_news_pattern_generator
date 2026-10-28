@@ -72,7 +72,7 @@ def who_news_pipeline():
         trigger_rule=TriggerRule.ALL_DONE,
     )
     def cleanup_old_articles() -> dict[str, object]:
-        """Remove raw articles published more than 90 days ago."""
+        """Keep WHO news for 365 days and Tech/Economic news for 90 days."""
         completed = subprocess.run(
             [
                 sys.executable,
@@ -154,8 +154,8 @@ def who_news_pipeline():
     retention_report = cleanup_old_articles()
     dbt_build = build_dbt_models(retention_report)
     for fetched_database in fetched_databases:
-        # Cleanup runs daily after every fetch attempt. dbt still requires both
-        # successful fetches and a successful cleanup, so it cannot build a
+        # Cleanup runs after every fetch attempt. dbt still requires every
+        # successful fetch and a successful cleanup, so it cannot build a
         # partial refresh when one source fails.
         fetched_database >> retention_report
         fetched_database >> dbt_build

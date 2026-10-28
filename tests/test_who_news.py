@@ -102,6 +102,57 @@ class FetchNewsTests(unittest.TestCase):
         self.assertIn("%24skip=0", first_request.full_url)
         self.assertIn("%24skip=2", second_request.full_url)
 
+    @patch("who_news_scripts.who_news.PAGE_SIZE", 2)
+    @patch("who_news_scripts.who_news.urlopen")
+    def test_skips_stored_ids_and_pages_until_it_finds_new_news(
+        self, mocked_urlopen
+    ):
+        mocked_urlopen.side_effect = [
+            FakeResponse(
+                {
+                    "value": [
+                        {
+                            "Id": "known-1",
+                            "Title": "Known one",
+                            "NewsType": "News release",
+                        },
+                        {
+                            "Id": "known-2",
+                            "Title": "Known two",
+                            "NewsType": "News release",
+                        },
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "value": [
+                        {
+                            "Id": "new-1",
+                            "Title": "New one",
+                            "NewsType": "News release",
+                        }
+                    ]
+                }
+            ),
+        ]
+
+        result = who_news.fetch_news(
+            limit=1,
+            existing_ids={"known-1", "known-2"},
+        )
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["known-1", "new-1"],
+        )
+        self.assertEqual(result["unseen_count"], 1)
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(result["existing_encountered"], 2)
+        self.assertEqual(result["skipped_existing"], 1)
+        self.assertEqual(result["scanned"], 3)
+        self.assertEqual(mocked_urlopen.call_count, 2)
+
     def test_rejects_invalid_limit(self):
         with self.assertRaises(ValueError):
             who_news.fetch_news(limit=0)
@@ -240,6 +291,77 @@ class SaveNewsTests(unittest.TestCase):
         self.assertEqual(second_result["staged"], 400)
         self.assertEqual(raw_count, 400)
         self.assertEqual(staged_count, 400)
+
+
+class IncrementalCliTests(unittest.TestCase):
+    @patch("builtins.print")
+    @patch("who_news_scripts.who_news.urlopen")
+    def test_repeated_runs_add_the_next_unseen_batch(
+        self, mocked_urlopen, _mocked_print
+    ):
+        first_payload = {
+            "value": [
+                {
+                    "Id": f"article-{number}",
+                    "Title": f"Article {number}",
+                    "NewsType": "News release",
+                }
+                for number in range(1, 5)
+            ]
+        }
+        second_payload = {
+            "value": [
+                {
+                    "Id": f"article-{number}",
+                    "Title": f"Corrected article {number}",
+                    "NewsType": "News release",
+                }
+                for number in range(1, 5)
+            ]
+        }
+        mocked_urlopen.side_effect = [
+            FakeResponse(first_payload),
+            FakeResponse(second_payload),
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "who_news.db"
+            output = Path(directory) / "latest.json"
+            arguments = [
+                "--limit",
+                "2",
+                "--database",
+                str(database),
+                "--output",
+                str(output),
+            ]
+
+            first_exit = who_news.main(arguments)
+            second_exit = who_news.main(arguments)
+
+            with closing(sqlite3.connect(database)) as connection:
+                rows = [
+                    tuple(row)
+                    for row in connection.execute(
+                        """
+                        SELECT id, title, first_seen_at, last_seen_at
+                        FROM articles
+                        ORDER BY id
+                        """
+                    )
+                ]
+            second_output = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual((first_exit, second_exit), (0, 0))
+        self.assertEqual(
+            [row[0] for row in rows],
+            ["article-1", "article-2", "article-3", "article-4"],
+        )
+        self.assertEqual(rows[0][1], "Corrected article 1")
+        self.assertNotEqual(rows[0][2], rows[0][3])
+        self.assertEqual(second_output["unseen_count"], 2)
+        self.assertEqual(second_output["refreshed_count"], 2)
+        self.assertEqual(second_output["count"], 4)
 
 
 if __name__ == "__main__":

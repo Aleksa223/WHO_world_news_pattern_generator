@@ -201,8 +201,14 @@ def fetch_tech_news(
     limit: int = DEFAULT_LIMIT,
     timeout: int = DEFAULT_TIMEOUT,
     workers: int = DEFAULT_WORKERS,
+    existing_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Fetch recent Hacker News stories while preserving feed order."""
+    """Fetch unseen stories and refresh stored stories in feed order.
+
+    ``limit`` independently caps new stories and stored stories selected for
+    refresh. Because those groups do not overlap, at most the number of IDs in
+    the bounded Hacker News feed are requested during one run.
+    """
     if not 1 <= limit <= MAX_ARTICLES:
         raise ValueError(f"limit must be between 1 and {MAX_ARTICLES}")
     if timeout <= 0:
@@ -211,33 +217,82 @@ def fetch_tech_news(
         raise ValueError(f"workers must be between 1 and {MAX_WORKERS}")
 
     story_ids = _fetch_story_ids(timeout)
-    articles: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    scanned = 0
-    cursor = 0
+    stored_ids = {
+        cleaned
+        for value in (existing_ids or set())
+        if (cleaned := _clean_text(value)) is not None
+    }
+    ranked_stories = list(enumerate(story_ids, start=1))
+    unseen_candidates = [
+        (feed_rank, item_id)
+        for feed_rank, item_id in ranked_stories
+        if str(item_id) not in stored_ids
+    ]
+    existing_candidates = [
+        (feed_rank, item_id)
+        for feed_rank, item_id in ranked_stories
+        if str(item_id) in stored_ids
+    ]
+    refresh_selection = existing_candidates[:limit]
+    new_articles: list[dict[str, Any]] = []
+    refreshed_articles: list[dict[str, Any]] = []
+    unseen_scanned = 0
+    refresh_scanned = 0
+    unseen_cursor = 0
 
-    if story_ids:
+    request_budget = len(unseen_candidates) + len(refresh_selection)
+    if request_budget:
         fetch_one = partial(_fetch_item, timeout=timeout)
-        with ThreadPoolExecutor(max_workers=min(workers, len(story_ids))) as executor:
-            while len(articles) < limit and cursor < len(story_ids):
-                remaining = limit - len(articles)
-                batch_ids = story_ids[cursor : cursor + remaining]
-                batch_start = cursor
-                cursor += len(batch_ids)
+        with ThreadPoolExecutor(
+            max_workers=min(workers, request_budget)
+        ) as executor:
+            while (
+                len(new_articles) < limit
+                and unseen_cursor < len(unseen_candidates)
+            ):
+                remaining = limit - len(new_articles)
+                batch = unseen_candidates[
+                    unseen_cursor : unseen_cursor + remaining
+                ]
+                unseen_cursor += len(batch)
+                batch_ids = [item_id for _, item_id in batch]
                 raw_items = list(executor.map(fetch_one, batch_ids))
-                scanned += len(raw_items)
+                unseen_scanned += len(raw_items)
 
-                for offset, raw_item in enumerate(raw_items):
+                for (feed_rank, _), raw_item in zip(batch, raw_items):
                     if raw_item is None:
                         continue
                     normalized = _normalize_item(raw_item)
-                    if normalized is None or normalized["id"] in seen_ids:
+                    if normalized is None:
                         continue
-                    normalized["feed_rank"] = batch_start + offset + 1
-                    seen_ids.add(normalized["id"])
-                    articles.append(normalized)
-                    if len(articles) == limit:
+                    normalized["feed_rank"] = feed_rank
+                    new_articles.append(normalized)
+                    if len(new_articles) == limit:
                         break
+
+            if refresh_selection:
+                refresh_ids = [item_id for _, item_id in refresh_selection]
+                raw_items = list(executor.map(fetch_one, refresh_ids))
+                refresh_scanned = len(raw_items)
+                for (feed_rank, _), raw_item in zip(
+                    refresh_selection, raw_items
+                ):
+                    if raw_item is None:
+                        continue
+                    normalized = _normalize_item(raw_item)
+                    if normalized is None:
+                        continue
+                    normalized["feed_rank"] = feed_rank
+                    refreshed_articles.append(normalized)
+
+    articles = sorted(
+        [*new_articles, *refreshed_articles],
+        key=lambda item: item["feed_rank"],
+    )
+    unseen_exhausted = (
+        len(new_articles) < limit
+        and unseen_cursor >= len(unseen_candidates)
+    )
 
     return {
         "source": HACKER_NEWS_FEED_URL,
@@ -246,11 +301,48 @@ def fetch_tech_news(
         "category": TECH_CATEGORY,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "count": len(articles),
+        "new_count": len(new_articles),
+        "refreshed_count": len(refreshed_articles),
         "available": len(story_ids),
-        "scanned": scanned,
-        "exhausted": len(articles) < limit and cursor >= len(story_ids),
+        "unseen_available": len(unseen_candidates),
+        "existing_available": len(existing_candidates),
+        "refresh_selected": len(refresh_selection),
+        "refresh_skipped": len(existing_candidates) - len(refresh_selection),
+        "unseen_scanned": unseen_scanned,
+        "refresh_scanned": refresh_scanned,
+        "scanned": unseen_scanned + refresh_scanned,
+        "exhausted": unseen_exhausted,
         "items": articles,
     }
+
+
+def load_existing_ids(database: Path) -> set[str]:
+    """Return IDs already persisted without creating a missing database."""
+    if not database.is_file():
+        return set()
+
+    try:
+        with closing(sqlite3.connect(database)) as connection:
+            table_exists = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'tech_articles'
+                """
+            ).fetchone()
+            if table_exists is None:
+                return set()
+            return {
+                article_id
+                for (value,) in connection.execute(
+                    "SELECT id FROM tech_articles WHERE id IS NOT NULL"
+                )
+                if (article_id := _clean_text(value)) is not None
+            }
+    except sqlite3.Error as exc:
+        raise TechNewsError(
+            f"Could not read existing technology news from {database}: {exc}"
+        ) from exc
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
@@ -581,23 +673,26 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
+            existing_ids = load_existing_ids(args.database)
             data = fetch_tech_news(
                 limit=args.limit,
                 timeout=args.timeout,
                 workers=args.workers,
+                existing_ids=existing_ids,
             )
             saved = save_tech_news(args.database, data)
             print(
                 f"Database {args.database}: {saved['inserted']} inserted, "
                 f"{saved['updated']} updated, {saved['staged']} staged "
-                f"({data['scanned']} items scanned from "
-                f"{data['available']} available)",
+                f"({data.get('new_count', saved['inserted'])} new, "
+                f"{data.get('refreshed_count', saved['updated'])} refreshed; "
+                f"{data['scanned']} of {data['available']} feed items scanned)",
                 file=sys.stderr,
             )
             if data["exhausted"]:
                 print(
-                    "warning: the Hacker News feed was exhausted before "
-                    "the requested number of valid stories was found",
+                    "warning: the Hacker News feed had fewer unseen valid "
+                    "stories than requested",
                     file=sys.stderr,
                 )
             _write_json(data, args.output)

@@ -20,6 +20,19 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+if __package__:
+    from .incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+else:  # Support ``python who_news_scripts/who_news.py``.
+    from incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+
 
 WHO_API_URL = "https://www.who.int/api/news/newsitems"
 WHO_NEWS_ITEM_URL = "https://www.who.int/news/item/"
@@ -93,12 +106,17 @@ def _fetch_page(skip: int, top: int, timeout: int) -> list[dict[str, Any]]:
     return [item for item in raw_items if isinstance(item, dict)]
 
 
-def fetch_news(limit: int = 10, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    """Fetch the newest WHO items with ``news`` in their news type.
+def fetch_news(
+    limit: int = 10,
+    timeout: int = DEFAULT_TIMEOUT,
+    existing_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """Fetch WHO news items not already present in the destination.
 
     Args:
-        limit: Number of articles to request (1 through 1000).
+        limit: Maximum number of previously unseen articles to return.
         timeout: HTTP timeout in seconds.
+        existing_ids: Stable WHO IDs already stored in the destination.
 
     Returns:
         A dictionary containing ``fetched_at``, ``count``, and ``items``.
@@ -112,19 +130,21 @@ def fetch_news(limit: int = 10, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any
     if timeout <= 0:
         raise ValueError("timeout must be greater than zero")
 
-    items: list[dict[str, Any]] = []
+    batch = IncrementalBatch[dict[str, Any]](limit, existing_ids)
     scanned = 0
     exhausted = False
 
-    while len(items) < limit and scanned < MAX_SCANNED_ITEMS:
+    while batch.needs_unseen and scanned < MAX_SCANNED_ITEMS:
         page_size = min(PAGE_SIZE, MAX_SCANNED_ITEMS - scanned)
         page = _fetch_page(skip=scanned, top=page_size, timeout=timeout)
         scanned += len(page)
 
         for item in page:
             if _contains_news(item.get("NewsType")):
-                items.append(_normalize_item(item))
-                if len(items) == limit:
+                normalized = _normalize_item(item)
+                item_id = normalized.get("id")
+                batch.consider(normalized, item_id)
+                if not batch.needs_unseen:
                     break
 
         if len(page) < page_size:
@@ -134,12 +154,12 @@ def fetch_news(limit: int = 10, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any
     return {
         "source": WHO_API_URL,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "count": len(items),
+        **batch.metadata(),
         "scanned": scanned,
         "scan_limit_reached": (
-            not exhausted and scanned >= MAX_SCANNED_ITEMS and len(items) < limit
+            not exhausted and scanned >= MAX_SCANNED_ITEMS and batch.needs_unseen
         ),
-        "items": items,
+        "items": batch.items,
     }
 
 
@@ -325,7 +345,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            data = fetch_news(limit=args.limit, timeout=args.timeout)
+            existing_ids = load_existing_ids(args.database, "articles")
+            data = fetch_news(
+                limit=args.limit,
+                timeout=args.timeout,
+                existing_ids=existing_ids,
+            )
             saved = save_news(args.database, data)
             print(
                 f"Database {args.database}: {saved['inserted']} inserted, "
@@ -343,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except WhoNewsError as exc:
+    except (WhoNewsError, IncrementalStateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

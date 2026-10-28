@@ -77,6 +77,41 @@ class FetchEventsTests(unittest.TestCase):
             second_request.full_url, "https://www.who.int/news-room/events/2"
         )
 
+    @patch("who_news_scripts.who_events.urlopen")
+    def test_skips_stored_events_and_follows_pages_for_the_next_batch(
+        self, mocked_urlopen
+    ):
+        known_path = "/news-room/events/detail/2026/10/01/known"
+        new_path = "/news-room/events/detail/2026/10/02/new"
+        page_one = f"""
+        <html><body>
+          {event_card(known_path, 'Known event', '1 October 2026')}
+          <a href="/news-room/events/1">1</a>
+          <a href="/news-room/events/2">2</a>
+        </body></html>
+        """
+        page_two = f"""
+        <html><body>
+          {event_card(new_path, 'New event', '2 October 2026')}
+        </body></html>
+        """
+        mocked_urlopen.side_effect = [FakeResponse(page_one), FakeResponse(page_two)]
+
+        result = who_events.fetch_events(
+            limit=1,
+            existing_ids={"2026/10/01/known"},
+        )
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["2026/10/01/known", "2026/10/02/new"],
+        )
+        self.assertEqual(result["unseen_count"], 1)
+        self.assertEqual(result["refreshed_count"], 1)
+        self.assertEqual(result["existing_encountered"], 1)
+        self.assertEqual(result["skipped_existing"], 0)
+        self.assertEqual(result["pages_scanned"], 2)
+
     def test_rejects_invalid_limit(self):
         with self.assertRaises(ValueError):
             who_events.fetch_events(limit=0)

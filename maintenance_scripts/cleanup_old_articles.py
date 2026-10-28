@@ -1,4 +1,4 @@
-"""Remove articles published more than 90 days before the current UTC time."""
+"""Apply source-specific publication-date retention to raw news databases."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from typing import Sequence
 
 
 DEFAULT_RETENTION_DAYS = 90
+WHO_NEWS_RETENTION_DAYS = 365
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -31,6 +32,7 @@ class RetentionTarget:
     database: str
     table: str
     date_column: str = "published_at"
+    retention_days: int = DEFAULT_RETENTION_DAYS
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,8 @@ class RetentionResult:
     database: str
     table: str
     date_column: str
+    retention_days: int
+    cutoff_utc: str
     eligible: int
     deleted: int
     remaining: int
@@ -53,6 +57,7 @@ RETENTION_TARGETS = (
         name="who_news",
         database="articles/who_news.db",
         table="articles",
+        retention_days=WHO_NEWS_RETENTION_DAYS,
     ),
     RetentionTarget(
         name="tech_news",
@@ -166,6 +171,7 @@ def _clean_target(
     target: RetentionTarget,
     cutoff: datetime,
     *,
+    retention_days: int,
     dry_run: bool,
 ) -> RetentionResult:
     table = _quote_identifier(target.table)
@@ -220,6 +226,8 @@ def _clean_target(
         database=target.database,
         table=target.table,
         date_column=target.date_column,
+        retention_days=retention_days,
+        cutoff_utc=cutoff_text,
         eligible=eligible,
         deleted=deleted,
         remaining=remaining,
@@ -230,30 +238,53 @@ def _clean_target(
 def cleanup_old_articles(
     project_root: Path,
     *,
-    retention_days: int = DEFAULT_RETENTION_DAYS,
+    retention_days: int | None = None,
     as_of: datetime | None = None,
     dry_run: bool = False,
     targets: Sequence[RetentionTarget] = RETENTION_TARGETS,
 ) -> dict[str, object]:
-    """Apply the publication-date retention policy to all allowed targets."""
+    """Apply each target's policy, or one explicit override, to all targets."""
     as_of_utc = _utc_datetime(as_of)
-    cutoff = calculate_cutoff(as_of=as_of_utc, retention_days=retention_days)
-    resolved_targets = [
-        (target, _resolve_database(project_root, target)) for target in targets
-    ]
+    if retention_days is not None and retention_days <= 0:
+        raise ValueError("retention_days must be greater than zero")
+
+    resolved_targets = []
+    for target in targets:
+        effective_retention_days = (
+            retention_days
+            if retention_days is not None
+            else target.retention_days
+        )
+        cutoff = calculate_cutoff(
+            as_of=as_of_utc,
+            retention_days=effective_retention_days,
+        )
+        resolved_targets.append(
+            (
+                target,
+                _resolve_database(project_root, target),
+                effective_retention_days,
+                cutoff,
+            )
+        )
 
     # Validate every target before deleting from any of them.
-    for target, database in resolved_targets:
+    for target, database, _, _ in resolved_targets:
         _validate_schema(database, target)
 
     results = [
-        _clean_target(database, target, cutoff, dry_run=dry_run)
-        for target, database in resolved_targets
+        _clean_target(
+            database,
+            target,
+            cutoff,
+            retention_days=effective_retention_days,
+            dry_run=dry_run,
+        )
+        for target, database, effective_retention_days, cutoff in resolved_targets
     ]
     return {
-        "retention_days": retention_days,
+        "retention_days_override": retention_days,
         "as_of_utc": _format_utc(as_of_utc),
-        "cutoff_utc": _format_utc(cutoff),
         "dry_run": dry_run,
         "eligible_total": sum(result.eligible for result in results),
         "deleted_total": sum(result.deleted for result in results),
@@ -271,8 +302,8 @@ def _positive_int(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Delete WHO, Tech, and Economic articles published more than a "
-            "configured number of days ago."
+            "Apply configured publication-date retention to WHO, Tech, and "
+            "Economic articles."
         )
     )
     parser.add_argument(
@@ -284,8 +315,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--retention-days",
         type=_positive_int,
-        default=DEFAULT_RETENTION_DAYS,
-        help=f"age in days to retain (default: {DEFAULT_RETENTION_DAYS})",
+        default=None,
+        help=(
+            "override the configured retention for every database "
+            f"(default: WHO {WHO_NEWS_RETENTION_DAYS} days; Tech and Economic "
+            f"{DEFAULT_RETENTION_DAYS} days)"
+        ),
     )
     parser.add_argument(
         "--as-of",

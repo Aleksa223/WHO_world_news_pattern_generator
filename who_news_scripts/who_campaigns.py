@@ -22,6 +22,19 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
+if __package__:
+    from .incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+else:  # Support ``python who_news_scripts/who_campaigns.py``.
+    from incremental import (
+        IncrementalBatch,
+        IncrementalStateError,
+        load_existing_ids,
+    )
+
 
 WHO_BASE_URL = "https://www.who.int"
 WHO_CAMPAIGNS_URL = f"{WHO_BASE_URL}/campaigns"
@@ -129,9 +142,11 @@ def _parse_campaigns(page: str) -> list[dict[str, str]]:
 
 
 def fetch_campaigns(
-    limit: int = 10, timeout: int = DEFAULT_TIMEOUT
+    limit: int = 10,
+    timeout: int = DEFAULT_TIMEOUT,
+    existing_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Fetch campaign titles and URLs from WHO's official campaigns index."""
+    """Fetch unseen campaigns from WHO's official campaigns index."""
     if not 1 <= limit <= MAX_CAMPAIGNS:
         raise ValueError(f"limit must be between 1 and {MAX_CAMPAIGNS}")
     if timeout <= 0:
@@ -161,14 +176,19 @@ def fetch_campaigns(
     if not campaigns:
         raise WhoCampaignsError("WHO campaigns page contained no campaign cards")
 
-    selected = campaigns[:limit]
+    batch = IncrementalBatch[dict[str, str]](limit, existing_ids)
+    for campaign in campaigns:
+        batch.consider(campaign, campaign["id"])
+        if not batch.needs_unseen:
+            break
+
     return {
         "source": WHO_CAMPAIGNS_URL,
         "campaign_type": CAMPAIGN_TYPE,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "count": len(selected),
+        **batch.metadata(),
         "available": len(campaigns),
-        "items": selected,
+        "items": batch.items,
     }
 
 
@@ -341,7 +361,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            data = fetch_campaigns(limit=args.limit, timeout=args.timeout)
+            existing_ids = load_existing_ids(args.database, "campaigns")
+            data = fetch_campaigns(
+                limit=args.limit,
+                timeout=args.timeout,
+                existing_ids=existing_ids,
+            )
             saved = save_campaigns(args.database, data)
             print(
                 f"Database {args.database}: {saved['inserted']} inserted, "
@@ -353,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except WhoCampaignsError as exc:
+    except (WhoCampaignsError, IncrementalStateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
