@@ -24,6 +24,17 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from maintenance_scripts.ingestion_audit import (  # noqa: E402
+    AuditTarget,
+    IngestionAuditError,
+    begin_ingestion_audit,
+)
+
+
 GDELT_DOC_API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_PROVIDER = "GDELT"
 ECONOMIC_CATEGORY = "economic"
@@ -37,6 +48,11 @@ DEFAULT_TIMEOUT = 30
 DEFAULT_LIMIT = 200
 MAX_ARTICLES = 250
 DEFAULT_DATABASE = Path("economic_articles/economic_news.db")
+AUDIT_TARGET = AuditTarget(
+    source_name="economic_news",
+    table="economic_articles",
+    date_column="published_at",
+)
 _TIMESPAN_PATTERN = re.compile(
     r"^[1-9][0-9]*(?:min|h|hours?|d|days?|w|weeks?|m|months?)$",
     re.IGNORECASE,
@@ -825,33 +841,46 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            data = fetch_economic_news(
-                limit=args.limit,
-                timeout=args.timeout,
-                query=args.query,
-                timespan=args.timespan,
-            )
-            saved = save_economic_news(args.database, data)
-            print(
-                f"Database {args.database}: {saved['inserted']} inserted, "
-                f"{saved['updated']} updated, {saved['staged']} staged "
-                f"({data['available']} results returned, "
-                f"{data['skipped']} skipped)",
-                file=sys.stderr,
-            )
-            if args.translate:
-                translated = _translate_saved_titles(args.database, args.timeout)
+            with begin_ingestion_audit(
+                args.database,
+                AUDIT_TARGET,
+                requested_limit=args.limit,
+            ) as audit:
+                data = fetch_economic_news(
+                    limit=args.limit,
+                    timeout=args.timeout,
+                    query=args.query,
+                    timespan=args.timespan,
+                )
+                saved = save_economic_news(args.database, data)
+                audit.set_changes(
+                    new_rows=saved["inserted"],
+                    refreshed_rows=saved["updated"],
+                    selected_rows=saved["total"],
+                )
                 print(
-                    f"Azure Translator: {translated['translated']} titles "
-                    f"translated, {translated['stale']} stale updates skipped "
-                    f"({translated['selected']} pending titles selected)",
+                    f"Database {args.database}: {saved['inserted']} inserted, "
+                    f"{saved['updated']} updated, {saved['staged']} staged "
+                    f"({data['available']} results returned, "
+                    f"{data['skipped']} skipped)",
                     file=sys.stderr,
                 )
-            _write_json(data, args.output)
+                if args.translate:
+                    translated = _translate_saved_titles(
+                        args.database,
+                        args.timeout,
+                    )
+                    print(
+                        f"Azure Translator: {translated['translated']} titles "
+                        f"translated, {translated['stale']} stale updates skipped "
+                        f"({translated['selected']} pending titles selected)",
+                        file=sys.stderr,
+                    )
+                _write_json(data, args.output)
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except (EconomicNewsError, ValueError) as exc:
+    except (EconomicNewsError, IngestionAuditError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -577,8 +577,10 @@ class TechNewsCliTests(unittest.TestCase):
         }
         stderr = io.StringIO()
 
-        with patch.dict(os.environ, {}, clear=True), redirect_stderr(stderr):
-            result = tech_news.main([])
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "tech-news.db"
+            with patch.dict(os.environ, {}, clear=True), redirect_stderr(stderr):
+                result = tech_news.main(["--database", str(database)])
 
         self.assertEqual(result, 0)
         mocked_fetch.assert_called_once_with(
@@ -590,7 +592,7 @@ class TechNewsCliTests(unittest.TestCase):
         mocked_save.assert_called_once()
         self.assertEqual(
             mocked_save.call_args.args[0],
-            Path("tech_articles/tech_news.db"),
+            database,
         )
         mocked_write.assert_called_once()
         self.assertNotIn("token", stderr.getvalue().casefold())

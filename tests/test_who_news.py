@@ -350,6 +350,14 @@ class IncrementalCliTests(unittest.TestCase):
                         """
                     )
                 ]
+                audit_rows = connection.execute(
+                    """
+                    SELECT status, new_rows, refreshed_rows, selected_rows,
+                           total_rows
+                    FROM ingestion_audit
+                    ORDER BY rowid
+                    """
+                ).fetchall()
             second_output = json.loads(output.read_text(encoding="utf-8"))
 
         self.assertEqual((first_exit, second_exit), (0, 0))
@@ -362,6 +370,13 @@ class IncrementalCliTests(unittest.TestCase):
         self.assertEqual(second_output["unseen_count"], 2)
         self.assertEqual(second_output["refreshed_count"], 2)
         self.assertEqual(second_output["count"], 4)
+        self.assertEqual(
+            audit_rows,
+            [
+                ("succeeded", 2, 0, 2, 2),
+                ("succeeded", 2, 2, 4, 4),
+            ],
+        )
 
 
 if __name__ == "__main__":

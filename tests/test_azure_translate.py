@@ -452,19 +452,20 @@ class AzureCliIntegrationTests(unittest.TestCase):
             "staged": 1,
         }
         mocked_translate.return_value = {"selected": 1, "translated": 1, "stale": 0}
-        database = Path("economic_articles/test-economic.db")
         stderr = io.StringIO()
 
-        with redirect_stderr(stderr):
-            result = economic_news.main(
-                [
-                    "--translate",
-                    "--database",
-                    str(database),
-                    "--timeout",
-                    "19",
-                ]
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "test-economic.db"
+            with redirect_stderr(stderr):
+                result = economic_news.main(
+                    [
+                        "--translate",
+                        "--database",
+                        str(database),
+                        "--timeout",
+                        "19",
+                    ]
+                )
 
         self.assertEqual(result, 0)
         mocked_save.assert_called_once()

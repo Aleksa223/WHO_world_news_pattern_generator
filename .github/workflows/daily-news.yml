@@ -32,7 +32,7 @@ jobs:
       - name: Check out the default branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Restore the latest successful raw database state
+      - name: Restore the latest successful pipeline database state
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,7 +47,7 @@ jobs:
           fi
 
           if [[ "${RESET_STATE}" == "true" ]]; then
-            echo "reset_state is enabled; starting with fresh cloud databases."
+            echo "reset_state is enabled; starting with fresh pipeline databases."
             exit 0
           fi
 
@@ -103,7 +103,7 @@ jobs:
             --user "$(id -u):0" \
             airflow airflow dags test who_news_pipeline
 
-      - name: Create a validated raw database snapshot
+      - name: Create validated pipeline database state
         run: |
           python3 maintenance_scripts/pipeline_state.py create \
             --project-root . \
@@ -121,19 +121,23 @@ jobs:
           sys.path.insert(0, str(Path("dags").resolve()))
           from news_pipeline_config import ALL_FETCH_JOBS
 
-          expected = [Path("warehouse/analytics.db")]
+          expected = [
+              Path("warehouse/analytics.db"),
+              Path("warehouse/snapshot_history.db"),
+          ]
           expected.extend(Path(job.output) for job in ALL_FETCH_JOBS)
           missing = [path.as_posix() for path in expected if not path.is_file()]
           if missing:
               raise SystemExit("Missing pipeline outputs: " + ", ".join(missing))
           PY
 
-      - name: Upload analytics database and latest-run JSON
+      - name: Upload analytics databases and latest-run JSON
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: news-analytics-${{ github.run_id }}
           path: |
             warehouse/analytics.db
+            warehouse/snapshot_history.db
             articles/who_latest_news.json
             articles/who_latest_campaigns.json
             articles/who_latest_commentaries.json
@@ -147,7 +151,7 @@ jobs:
           retention-days: 14
           compression-level: 6
 
-      - name: Save raw database state for the next scheduled run
+      - name: Save pipeline database state for the next scheduled run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: raw-sqlite-state

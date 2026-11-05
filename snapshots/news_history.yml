@@ -1,0 +1,98 @@
+version: 2
+
+snapshots:
+  - name: tech_article_history
+    relation: source('tech_news', 'tech_articles')
+    description: >
+      Type-2 history of meaningful Hacker News story changes. Ingestion-only
+      fields such as feed rank and last-seen time are excluded so an unchanged
+      refresh does not create a new version.
+    config:
+      schema: snapshot_history
+      unique_key: id
+      strategy: check
+      check_cols:
+        - title
+        - description
+        - keywords
+        - snippet
+        - url
+        - discussion_url
+        - image_url
+        - language
+        - published_at
+        - source
+        - author
+        - score
+        - comment_count
+      hard_deletes: invalidate
+    columns:
+      - name: id
+        description: Stable Hacker News item ID shared by all versions.
+        data_tests:
+          - not_null
+      - name: dbt_scd_id
+        description: Unique identifier for one historical version.
+        data_tests:
+          - not_null
+          - unique
+      - name: dbt_updated_at
+        description: Time at which dbt detected this version.
+        data_tests:
+          - not_null
+      - name: dbt_valid_from
+        description: Beginning of this version's validity interval.
+        data_tests:
+          - not_null
+      - name: dbt_valid_to
+        description: End of the interval; null for a current source record.
+
+  - name: economic_article_history
+    relation: source('economic_news', 'economic_articles')
+    description: >
+      Type-2 history of meaningful GDELT metadata and title-translation
+      changes. Operational ingestion fields are excluded from change checks.
+    config:
+      schema: snapshot_history
+      unique_key: id
+      strategy: check
+      check_cols:
+        - title
+        - title_original
+        - title_english
+        - translation_source_language
+        - translation_status
+        - translation_provider
+        - translated_at
+        - description
+        - keywords
+        - snippet
+        - mobile_url
+        - image_url
+        - language
+        - published_at
+        - gdelt_seen_at
+        - gdelt_seen_date
+        - source
+        - source_country
+      hard_deletes: invalidate
+    columns:
+      - name: id
+        description: Stable canonical-URL hash shared by all versions.
+        data_tests:
+          - not_null
+      - name: dbt_scd_id
+        description: Unique identifier for one historical version.
+        data_tests:
+          - not_null
+          - unique
+      - name: dbt_updated_at
+        description: Time at which dbt detected this version.
+        data_tests:
+          - not_null
+      - name: dbt_valid_from
+        description: Beginning of this version's validity interval.
+        data_tests:
+          - not_null
+      - name: dbt_valid_to
+        description: End of the interval; null for a current source record.

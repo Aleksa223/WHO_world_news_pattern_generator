@@ -17,4 +17,5 @@ who_world_news:
         stories_news: articles/who_stories_news.db
         tech_articles: tech_articles/tech_news.db
         economic_articles: economic_articles/economic_news.db
+        main_snapshot_history: warehouse/snapshot_history.db
       schema_directory: warehouse

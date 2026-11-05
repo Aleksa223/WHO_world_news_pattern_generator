@@ -22,6 +22,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from maintenance_scripts.ingestion_audit import (  # noqa: E402
+    AuditTarget,
+    IngestionAuditError,
+    begin_ingestion_audit,
+)
+
 if __package__:
     from .incremental import (
         IncrementalBatch,
@@ -42,6 +52,7 @@ CAMPAIGN_TYPE = "Campaigns"
 DEFAULT_TIMEOUT = 30
 MAX_CAMPAIGNS = 1000
 DEFAULT_DATABASE = Path("articles/who_campaign_news.db")
+AUDIT_TARGET = AuditTarget("who_campaigns", "campaigns", None)
 
 
 class WhoCampaignsError(RuntimeError):
@@ -361,24 +372,34 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            existing_ids = load_existing_ids(args.database, "campaigns")
-            data = fetch_campaigns(
-                limit=args.limit,
-                timeout=args.timeout,
-                existing_ids=existing_ids,
-            )
-            saved = save_campaigns(args.database, data)
-            print(
-                f"Database {args.database}: {saved['inserted']} inserted, "
-                f"{saved['updated']} updated, {saved['staged']} staged "
-                f"({data['available']} campaign cards available)",
-                file=sys.stderr,
-            )
-            _write_json(data, args.output)
+            with begin_ingestion_audit(
+                args.database,
+                AUDIT_TARGET,
+                requested_limit=args.limit,
+            ) as audit:
+                existing_ids = load_existing_ids(args.database, "campaigns")
+                data = fetch_campaigns(
+                    limit=args.limit,
+                    timeout=args.timeout,
+                    existing_ids=existing_ids,
+                )
+                saved = save_campaigns(args.database, data)
+                audit.set_changes(
+                    new_rows=saved["inserted"],
+                    refreshed_rows=saved["updated"],
+                    selected_rows=saved["total"],
+                )
+                print(
+                    f"Database {args.database}: {saved['inserted']} inserted, "
+                    f"{saved['updated']} updated, {saved['staged']} staged "
+                    f"({data['available']} campaign cards available)",
+                    file=sys.stderr,
+                )
+                _write_json(data, args.output)
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except (WhoCampaignsError, IncrementalStateError) as exc:
+    except (WhoCampaignsError, IncrementalStateError, IngestionAuditError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

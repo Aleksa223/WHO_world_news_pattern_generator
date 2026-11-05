@@ -24,3 +24,6 @@ sources:
               - accepted_values:
                   arguments:
                     values: [story, comment, job, poll, pollopt]
+      - name: ingestion_audit
+        description: >
+          Ingestion-run audit records stored beside the raw Hacker News items.

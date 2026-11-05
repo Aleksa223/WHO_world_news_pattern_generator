@@ -20,6 +20,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from maintenance_scripts.ingestion_audit import (  # noqa: E402
+    AuditTarget,
+    IngestionAuditError,
+    begin_ingestion_audit,
+)
+
 if __package__:
     from .incremental import (
         IncrementalBatch,
@@ -44,6 +54,7 @@ PAGE_SIZE = 100
 MAX_FEATURE_STORIES = 1000
 MAX_SCANNED_ITEMS = 20_000
 DEFAULT_DATABASE = Path("articles/who_stories_news.db")
+AUDIT_TARGET = AuditTarget("who_stories", "feature_stories", "published_at")
 
 
 class WhoFeatureStoriesError(RuntimeError):
@@ -353,30 +364,40 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            existing_ids = load_existing_ids(args.database, "feature_stories")
-            data = fetch_feature_stories(
-                limit=args.limit,
-                timeout=args.timeout,
-                existing_ids=existing_ids,
-            )
-            saved = save_feature_stories(args.database, data)
-            print(
-                f"Database {args.database}: {saved['inserted']} inserted, "
-                f"{saved['updated']} updated, {saved['staged']} staged "
-                f"({data['scanned']} Feature stories scanned)",
-                file=sys.stderr,
-            )
-            if data["scan_limit_reached"]:
+            with begin_ingestion_audit(
+                args.database,
+                AUDIT_TARGET,
+                requested_limit=args.limit,
+            ) as audit:
+                existing_ids = load_existing_ids(args.database, "feature_stories")
+                data = fetch_feature_stories(
+                    limit=args.limit,
+                    timeout=args.timeout,
+                    existing_ids=existing_ids,
+                )
+                saved = save_feature_stories(args.database, data)
+                audit.set_changes(
+                    new_rows=saved["inserted"],
+                    refreshed_rows=saved["updated"],
+                    selected_rows=saved["total"],
+                )
                 print(
-                    "warning: scan limit reached before the requested number "
-                    "of unseen Feature stories was found",
+                    f"Database {args.database}: {saved['inserted']} inserted, "
+                    f"{saved['updated']} updated, {saved['staged']} staged "
+                    f"({data['scanned']} Feature stories scanned)",
                     file=sys.stderr,
                 )
-            _write_json(data, args.output)
+                if data["scan_limit_reached"]:
+                    print(
+                        "warning: scan limit reached before the requested number "
+                        "of unseen Feature stories was found",
+                        file=sys.stderr,
+                    )
+                _write_json(data, args.output)
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except (WhoFeatureStoriesError, IncrementalStateError) as exc:
+    except (WhoFeatureStoriesError, IncrementalStateError, IngestionAuditError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

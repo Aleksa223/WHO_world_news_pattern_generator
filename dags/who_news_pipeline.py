@@ -9,7 +9,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from airflow.sdk import TriggerRule, dag, task, task_group
+from airflow.sdk import TriggerRule, dag, get_current_context, task, task_group
 
 from news_pipeline_config import (
     DBT_NEWS_SELECTION,
@@ -25,6 +25,22 @@ DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = Path(
     os.environ.get("WHO_NEWS_PROJECT_ROOT", DEFAULT_PROJECT_ROOT)
 ).resolve()
+PIPELINE_RUN_ID_ENV = "NEWS_PIPELINE_RUN_ID"
+PIPELINE_ATTEMPT_ENV = "NEWS_PIPELINE_ATTEMPT"
+
+
+def audit_subprocess_environment() -> dict[str, str]:
+    """Pass one Airflow run identity through all source subprocesses."""
+    context = get_current_context()
+    environment = os.environ.copy()
+    environment[PIPELINE_RUN_ID_ENV] = str(context["run_id"])
+    task_instance = context.get("task_instance") or context.get("ti")
+    try_number = getattr(task_instance, "try_number", None)
+    if isinstance(try_number, int) and try_number > 0:
+        environment[PIPELINE_ATTEMPT_ENV] = str(try_number)
+    else:
+        environment.pop(PIPELINE_ATTEMPT_ENV, None)
+    return environment
 
 
 @dag(
@@ -45,18 +61,24 @@ PROJECT_ROOT = Path(
 def who_news_pipeline():
     @task(execution_timeout=timedelta(minutes=15))
     def fetch_source(
+        source_name: str,
         script: str,
         database: str,
         output: str,
+        table: str,
+        date_column: str | None,
         limit: int,
         extra_args: list[str],
     ) -> str:
         """Fetch one source into its raw SQLite database."""
         job = FetchJob(
             name="runtime",
+            source_name=source_name,
             script=script,
             database=database,
             output=output,
+            table=table,
+            date_column=date_column,
             fetch_limit=limit,
             extra_args=tuple(extra_args),
         )
@@ -64,6 +86,7 @@ def who_news_pipeline():
             build_fetch_command(job, PROJECT_ROOT, sys.executable),
             cwd=PROJECT_ROOT,
             check=True,
+            env=audit_subprocess_environment(),
         )
         return str(PROJECT_ROOT / database)
 
@@ -87,6 +110,7 @@ def who_news_pipeline():
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            env=audit_subprocess_environment(),
         )
         if completed.stdout:
             print(completed.stdout, end="")
@@ -123,9 +147,12 @@ def who_news_pipeline():
     def create_fetch_tasks(jobs: tuple[FetchJob, ...]):
         return [
             fetch_source.override(task_id=f"fetch_{job.name}")(
+                source_name=job.source_name,
                 script=job.script,
                 database=job.database,
                 output=job.output,
+                table=job.table,
+                date_column=job.date_column,
                 limit=job.fetch_limit,
                 extra_args=list(job.extra_args),
             )

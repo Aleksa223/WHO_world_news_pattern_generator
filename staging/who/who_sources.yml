@@ -6,6 +6,8 @@ sources:
     schema: who_news
     tables:
       - name: articles
+      - name: ingestion_audit
+        description: Ingestion-run audit records stored beside the raw WHO news.
 
   - name: campaign_news
     description: Raw WHO campaign data stored in the local SQLite database.
@@ -13,6 +15,8 @@ sources:
     tables:
       - name: articles
         identifier: campaigns
+      - name: ingestion_audit
+        description: Ingestion-run audit records stored beside raw WHO campaigns.
 
   - name: commentary_news
     description: Raw WHO commentary data stored in the local SQLite database.
@@ -20,6 +24,8 @@ sources:
     tables:
       - name: articles
         identifier: commentaries
+      - name: ingestion_audit
+        description: Ingestion-run audit records stored beside raw WHO commentaries.
 
   - name: event_news
     description: Raw WHO event data stored in the local SQLite database.
@@ -27,6 +33,8 @@ sources:
     tables:
       - name: articles
         identifier: events
+      - name: ingestion_audit
+        description: Ingestion-run audit records stored beside raw WHO events.
 
   - name: speech_news
     description: Raw WHO speech data stored in the local SQLite database.
@@ -34,6 +42,8 @@ sources:
     tables:
       - name: articles
         identifier: speeches
+      - name: ingestion_audit
+        description: Ingestion-run audit records stored beside raw WHO speeches.
 
   - name: statement_news
     description: Raw WHO statement data stored in the local SQLite database.
@@ -41,6 +51,8 @@ sources:
     tables:
       - name: articles
         identifier: statements
+      - name: ingestion_audit
+        description: Ingestion-run audit records stored beside raw WHO statements.
 
   - name: stories_news
     description: Raw WHO feature-story data stored in the local SQLite database.
@@ -48,3 +60,5 @@ sources:
     tables:
       - name: articles
         identifier: feature_stories
+      - name: ingestion_audit
+        description: Ingestion-run audit records stored beside raw WHO feature stories.

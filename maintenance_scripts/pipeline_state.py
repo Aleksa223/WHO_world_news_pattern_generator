@@ -25,18 +25,17 @@ from news_pipeline_config import ALL_FETCH_JOBS  # noqa: E402
 
 
 MANIFEST_FILENAME = "manifest.json"
-SNAPSHOT_FORMAT_VERSION = 1
-EXPECTED_TABLE_BY_JOB = {
-    "news": "articles",
-    "campaigns": "campaigns",
-    "commentaries": "commentaries",
-    "events": "events",
-    "speeches": "speeches",
-    "statements": "statements",
-    "stories": "feature_stories",
-    "tech_news": "tech_articles",
-    "economic_news": "economic_articles",
-}
+LEGACY_SNAPSHOT_FORMAT_VERSION = 1
+SNAPSHOT_FORMAT_VERSION = 2
+DBT_SNAPSHOT_DATABASES = (
+    (
+        Path("warehouse/snapshot_history.db"),
+        ("tech_article_history", "economic_article_history"),
+    ),
+)
+DBT_SNAPSHOT_DATABASE_PATHS = tuple(
+    path for path, _ in DBT_SNAPSHOT_DATABASES
+)
 
 
 class PipelineStateError(RuntimeError):
@@ -44,17 +43,8 @@ class PipelineStateError(RuntimeError):
 
 
 def _configured_databases() -> tuple[tuple[Path, str], ...]:
-    unknown_jobs = {
-        job.name for job in ALL_FETCH_JOBS if job.name not in EXPECTED_TABLE_BY_JOB
-    }
-    if unknown_jobs:
-        raise PipelineStateError(
-            "No expected SQLite table configured for jobs: "
-            + ", ".join(sorted(unknown_jobs))
-        )
-
     databases = tuple(
-        (Path(job.database), EXPECTED_TABLE_BY_JOB[job.name])
+        (Path(job.database), job.table)
         for job in ALL_FETCH_JOBS
     )
     paths = [path.as_posix() for path, _ in databases]
@@ -88,9 +78,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_database(path: Path, expected_table: str) -> None:
+def _validate_database(
+    path: Path,
+    expected_tables: str | Sequence[str],
+) -> None:
     if path.is_symlink() or not path.is_file():
         raise PipelineStateError(f"SQLite state file is missing or unsafe: {path}")
+
+    if isinstance(expected_tables, str):
+        required_tables = (expected_tables,)
+    else:
+        required_tables = tuple(expected_tables)
+    if not required_tables:
+        raise PipelineStateError(f"No required tables configured for {path}")
 
     uri = f"{path.resolve().as_uri()}?mode=ro"
     try:
@@ -100,14 +100,20 @@ def _validate_database(path: Path, expected_table: str) -> None:
                 raise PipelineStateError(
                     f"SQLite integrity check failed for {path}: {check_rows}"
                 )
-            table_exists = connection.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type = 'table' AND name = ? LIMIT 1",
-                (expected_table,),
-            ).fetchone()
-            if table_exists is None:
+            placeholders = ",".join("?" for _ in required_tables)
+            existing_tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    f"WHERE type = 'table' AND name IN ({placeholders})",
+                    required_tables,
+                )
+            }
+            missing_tables = set(required_tables) - existing_tables
+            if missing_tables:
                 raise PipelineStateError(
-                    f"Expected table {expected_table!r} is missing from {path}"
+                    "Expected SQLite tables are missing from "
+                    f"{path}: {', '.join(sorted(missing_tables))}"
                 )
     except sqlite3.Error as exc:
         raise PipelineStateError(f"Could not validate SQLite database {path}: {exc}") from exc
@@ -136,7 +142,7 @@ def create_snapshot(
     source_commit: str = "unknown",
     workflow_run_id: str = "local",
 ) -> dict[str, Any]:
-    """Copy all raw databases into a validated, self-contained snapshot."""
+    """Copy raw and dbt-history databases into validated pipeline state."""
     project_root = project_root.resolve()
     snapshot_directory = snapshot_directory.resolve()
     if snapshot_directory.exists():
@@ -150,26 +156,40 @@ def create_snapshot(
             )
     snapshot_directory.mkdir(parents=True, exist_ok=True)
 
-    source_files: list[tuple[Path, Path, str]] = []
+    source_files: list[tuple[Path, Path, tuple[str, ...], str]] = []
     for relative_path, expected_table in RAW_DATABASES:
         source = _resolved_child(project_root, relative_path)
         if source.is_symlink() or not source.is_file():
             raise PipelineStateError(f"Required raw database is missing: {relative_path}")
-        source_files.append((relative_path, source, expected_table))
+        source_files.append((relative_path, source, (expected_table,), "raw"))
+
+    for relative_path, expected_tables in DBT_SNAPSHOT_DATABASES:
+        source = _resolved_child(project_root, relative_path)
+        if source.is_symlink() or not source.is_file():
+            raise PipelineStateError(
+                f"Required dbt snapshot database is missing: {relative_path}"
+            )
+        source_files.append(
+            (relative_path, source, tuple(expected_tables), "dbt_snapshot")
+        )
 
     database_entries: list[dict[str, Any]] = []
-    for relative_path, source, expected_table in source_files:
+    dbt_snapshot_entries: list[dict[str, Any]] = []
+    for relative_path, source, expected_tables, state_type in source_files:
         destination = _resolved_child(snapshot_directory, relative_path)
         _backup_database(source, destination)
-        _validate_database(destination, expected_table)
-        database_entries.append(
-            {
-                "path": relative_path.as_posix(),
-                "expected_table": expected_table,
-                "size_bytes": destination.stat().st_size,
-                "sha256": _sha256(destination),
-            }
-        )
+        _validate_database(destination, expected_tables)
+        entry = {
+            "path": relative_path.as_posix(),
+            "size_bytes": destination.stat().st_size,
+            "sha256": _sha256(destination),
+        }
+        if state_type == "raw":
+            entry["expected_table"] = expected_tables[0]
+            database_entries.append(entry)
+        else:
+            entry["expected_tables"] = list(expected_tables)
+            dbt_snapshot_entries.append(entry)
 
     manifest = {
         "format_version": SNAPSHOT_FORMAT_VERSION,
@@ -177,6 +197,7 @@ def create_snapshot(
         "source_commit": source_commit,
         "workflow_run_id": workflow_run_id,
         "databases": database_entries,
+        "dbt_snapshot_databases": dbt_snapshot_entries,
     }
     manifest_path = snapshot_directory / MANIFEST_FILENAME
     manifest_path.write_text(
@@ -195,7 +216,11 @@ def _load_and_validate_manifest(snapshot_directory: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise PipelineStateError(f"Snapshot manifest is invalid: {exc}") from exc
 
-    if manifest.get("format_version") != SNAPSHOT_FORMAT_VERSION:
+    format_version = manifest.get("format_version")
+    if format_version not in {
+        LEGACY_SNAPSHOT_FORMAT_VERSION,
+        SNAPSHOT_FORMAT_VERSION,
+    }:
         raise PipelineStateError("Unsupported pipeline-state snapshot format")
     entries = manifest.get("databases")
     if not isinstance(entries, list):
@@ -212,6 +237,36 @@ def _load_and_validate_manifest(snapshot_directory: Path) -> dict[str, Any]:
         raise PipelineStateError(
             "Snapshot database paths do not exactly match the configured fetch jobs"
         )
+
+    snapshot_entries = manifest.get("dbt_snapshot_databases")
+    if format_version == LEGACY_SNAPSHOT_FORMAT_VERSION:
+        if snapshot_entries is not None:
+            raise PipelineStateError(
+                "Legacy pipeline-state snapshot unexpectedly contains dbt history"
+            )
+        manifest["dbt_snapshot_databases"] = []
+        return manifest
+
+    if not isinstance(snapshot_entries, list):
+        raise PipelineStateError("Snapshot manifest has no dbt snapshot database list")
+    if any(
+        not isinstance(entry, dict) or not isinstance(entry.get("path"), str)
+        for entry in snapshot_entries
+    ):
+        raise PipelineStateError(
+            "Snapshot manifest contains an invalid dbt snapshot database entry"
+        )
+    expected_snapshot_paths = {
+        path.as_posix() for path in DBT_SNAPSHOT_DATABASE_PATHS
+    }
+    actual_snapshot_paths = {entry["path"] for entry in snapshot_entries}
+    if (
+        len(snapshot_entries) != len(actual_snapshot_paths)
+        or actual_snapshot_paths != expected_snapshot_paths
+    ):
+        raise PipelineStateError(
+            "Snapshot database paths do not exactly match configured dbt history"
+        )
     return manifest
 
 
@@ -219,13 +274,17 @@ def restore_snapshot(
     project_root: Path,
     snapshot_directory: Path,
 ) -> dict[str, Any]:
-    """Validate a snapshot completely, then atomically restore each raw database."""
+    """Validate all state before replacing any raw or dbt-history database."""
     project_root = project_root.resolve()
     snapshot_directory = snapshot_directory.resolve()
     manifest = _load_and_validate_manifest(snapshot_directory)
     entries_by_path = {entry["path"]: entry for entry in manifest["databases"]}
+    snapshot_entries_by_path = {
+        entry["path"]: entry
+        for entry in manifest["dbt_snapshot_databases"]
+    }
 
-    validated_sources: list[tuple[Path, Path]] = []
+    validated_raw_sources: list[tuple[Path, Path]] = []
     for relative_path, expected_table in RAW_DATABASES:
         relative_text = relative_path.as_posix()
         entry = entries_by_path[relative_text]
@@ -239,28 +298,55 @@ def restore_snapshot(
             raise PipelineStateError(f"Snapshot size mismatch for {relative_text}")
         if _sha256(source) != entry.get("sha256"):
             raise PipelineStateError(f"Snapshot checksum mismatch for {relative_text}")
-        validated_sources.append((relative_path, source))
+        validated_raw_sources.append((relative_path, source))
+
+    validated_snapshot_sources: list[tuple[Path, Path]] = []
+    for relative_path, expected_tables in DBT_SNAPSHOT_DATABASES:
+        relative_text = relative_path.as_posix()
+        entry = snapshot_entries_by_path.get(relative_text)
+        if entry is None:
+            continue
+        if entry.get("expected_tables") != list(expected_tables):
+            raise PipelineStateError(
+                f"Snapshot table contract does not match for {relative_text}"
+            )
+        source = _resolved_child(snapshot_directory, relative_path)
+        _validate_database(source, expected_tables)
+        if source.stat().st_size != entry.get("size_bytes"):
+            raise PipelineStateError(f"Snapshot size mismatch for {relative_text}")
+        if _sha256(source) != entry.get("sha256"):
+            raise PipelineStateError(f"Snapshot checksum mismatch for {relative_text}")
+        validated_snapshot_sources.append((relative_path, source))
 
     restored: list[str] = []
-    for relative_path, source in validated_sources:
-        destination = _resolved_child(project_root, relative_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{destination.name}.",
-            suffix=".tmp",
-            dir=destination.parent,
-        )
-        os.close(descriptor)
-        temporary_path = Path(temporary_name)
-        try:
-            shutil.copy2(source, temporary_path)
-            os.replace(temporary_path, destination)
-        finally:
-            temporary_path.unlink(missing_ok=True)
-        restored.append(relative_path.as_posix())
+    restored_snapshot_databases: list[str] = []
+    for state_type, validated_sources in (
+        ("raw", validated_raw_sources),
+        ("dbt_snapshot", validated_snapshot_sources),
+    ):
+        for relative_path, source in validated_sources:
+            destination = _resolved_child(project_root, relative_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                dir=destination.parent,
+            )
+            os.close(descriptor)
+            temporary_path = Path(temporary_name)
+            try:
+                shutil.copy2(source, temporary_path)
+                os.replace(temporary_path, destination)
+            finally:
+                temporary_path.unlink(missing_ok=True)
+            if state_type == "raw":
+                restored.append(relative_path.as_posix())
+            else:
+                restored_snapshot_databases.append(relative_path.as_posix())
 
     return {
         "restored": restored,
+        "restored_dbt_snapshot_databases": restored_snapshot_databases,
         "source_commit": manifest.get("source_commit"),
         "workflow_run_id": manifest.get("workflow_run_id"),
     }
@@ -268,7 +354,7 @@ def restore_snapshot(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create or restore validated raw SQLite pipeline state."
+        description="Create or restore validated SQLite pipeline state."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

@@ -24,6 +24,17 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from maintenance_scripts.ingestion_audit import (  # noqa: E402
+    AuditTarget,
+    IngestionAuditError,
+    begin_ingestion_audit,
+)
+
+
 HACKER_NEWS_API_ROOT = "https://hacker-news.firebaseio.com/v0"
 HACKER_NEWS_FEED_URL = f"{HACKER_NEWS_API_ROOT}/newstories.json"
 HACKER_NEWS_ITEM_URL = f"{HACKER_NEWS_API_ROOT}/item/{{item_id}}.json"
@@ -36,6 +47,11 @@ DEFAULT_WORKERS = 16
 MAX_WORKERS = 32
 MAX_ARTICLES = 500
 DEFAULT_DATABASE = Path("tech_articles/tech_news.db")
+AUDIT_TARGET = AuditTarget(
+    source_name="tech_news",
+    table="tech_articles",
+    date_column="published_at",
+)
 
 
 class TechNewsError(RuntimeError):
@@ -673,33 +689,43 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            existing_ids = load_existing_ids(args.database)
-            data = fetch_tech_news(
-                limit=args.limit,
-                timeout=args.timeout,
-                workers=args.workers,
-                existing_ids=existing_ids,
-            )
-            saved = save_tech_news(args.database, data)
-            print(
-                f"Database {args.database}: {saved['inserted']} inserted, "
-                f"{saved['updated']} updated, {saved['staged']} staged "
-                f"({data.get('new_count', saved['inserted'])} new, "
-                f"{data.get('refreshed_count', saved['updated'])} refreshed; "
-                f"{data['scanned']} of {data['available']} feed items scanned)",
-                file=sys.stderr,
-            )
-            if data["exhausted"]:
+            with begin_ingestion_audit(
+                args.database,
+                AUDIT_TARGET,
+                requested_limit=args.limit,
+            ) as audit:
+                existing_ids = load_existing_ids(args.database)
+                data = fetch_tech_news(
+                    limit=args.limit,
+                    timeout=args.timeout,
+                    workers=args.workers,
+                    existing_ids=existing_ids,
+                )
+                saved = save_tech_news(args.database, data)
+                audit.set_changes(
+                    new_rows=saved["inserted"],
+                    refreshed_rows=saved["updated"],
+                    selected_rows=saved["total"],
+                )
                 print(
-                    "warning: the Hacker News feed had fewer unseen valid "
-                    "stories than requested",
+                    f"Database {args.database}: {saved['inserted']} inserted, "
+                    f"{saved['updated']} updated, {saved['staged']} staged "
+                    f"({data.get('new_count', saved['inserted'])} new, "
+                    f"{data.get('refreshed_count', saved['updated'])} refreshed; "
+                    f"{data['scanned']} of {data['available']} feed items scanned)",
                     file=sys.stderr,
                 )
-            _write_json(data, args.output)
+                if data["exhausted"]:
+                    print(
+                        "warning: the Hacker News feed had fewer unseen valid "
+                        "stories than requested",
+                        file=sys.stderr,
+                    )
+                _write_json(data, args.output)
             if args.watch is None:
                 return 0
             time.sleep(args.watch)
-    except TechNewsError as exc:
+    except (TechNewsError, IngestionAuditError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

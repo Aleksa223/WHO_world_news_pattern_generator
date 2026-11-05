@@ -39,7 +39,8 @@ words plus conservative canonical topic families. The marts in
 top-20 literal and grouped views within each WHO content category.
 Raw WHO, Hacker News, and GDELT records remain in their source databases,
 while dbt writes its staging, intermediate, seed, and mart relations to
-`warehouse/analytics.db`.
+`warehouse/analytics.db`. dbt keeps Tech and Economic article change history
+separately in `warehouse/snapshot_history.db`.
 After installing the project requirements, build it from the project root with:
 
 ```powershell
@@ -380,6 +381,43 @@ sqlite3 -header -column warehouse/analytics.db "SELECT news_type, content_type, 
 sqlite3 -header -column warehouse/analytics.db "SELECT observation_date, topic, COUNT(*) AS article_count FROM all_news_mart_articles GROUP BY observation_date, topic ORDER BY observation_date DESC, topic;"
 ```
 
+## Track article changes with dbt snapshots
+
+The project has two dbt snapshots in `snapshots/news_history.yml`:
+
+- `tech_article_history` records meaningful Hacker News changes such as score,
+  comment count, title, author, and publication metadata.
+- `economic_article_history` records meaningful GDELT changes such as title,
+  translation state, description, source, and publication metadata.
+
+The snapshots use dbt's `check` strategy and write slowly changing dimension
+type 2 history to `warehouse/snapshot_history.db`. Ingestion-only fields such
+as `last_seen_at` are deliberately excluded, so simply seeing the same article
+again does not create a new version. If a checked value changes, dbt closes the
+old version and inserts a new current version. If a source row is deleted by
+retention, dbt invalidates its current version instead of deleting its history.
+
+Build both snapshots and run their tests with:
+
+```powershell
+dbt build --select path:snapshots --profiles-dir .
+```
+
+You can also use `dbt snapshot --profiles-dir .` when you only want to capture
+changes, but `dbt build` is preferred here because it also runs the snapshot
+tests. Each row has `dbt_valid_from` and `dbt_valid_to`; a null
+`dbt_valid_to` means that the version is current. For example:
+
+```powershell
+sqlite3 -header -column warehouse/snapshot_history.db "SELECT id, title, score, comment_count, dbt_valid_from, dbt_valid_to FROM tech_article_history WHERE id = '<article-id>' ORDER BY dbt_valid_from;"
+sqlite3 -header -column warehouse/snapshot_history.db "SELECT id, title, dbt_valid_from FROM economic_article_history WHERE dbt_valid_to IS NULL ORDER BY dbt_valid_from DESC LIMIT 20;"
+```
+
+Snapshot history starts with the first snapshot run; it cannot reconstruct
+changes that happened earlier. It intentionally outlives the 90-day raw Tech
+and Economic retention window. Add a separate history-retention policy if that
+indefinite history is not desired.
+
 ## Orchestrate with Airflow
 
 When an Airflow scheduler is running, the DAG in `dags/who_news_pipeline.py`
@@ -387,9 +425,10 @@ runs every day at 06:00 UTC. It starts the seven WHO fetchers plus the Hacker
 News and GDELT economic-news fetchers in parallel, writing each source to its
 SQLite database configured in `profiles.yml`. After all nine fetch tasks
 succeed, it runs `dbt build` across the WHO, Tech, and Economic staging,
-intermediate, mart, and seed resources and their tests, refreshing
-`warehouse/analytics.db`. A failed fetch is retried twice and prevents dbt from
-building a partial daily refresh.
+intermediate, mart, seed, and snapshot resources and their tests, refreshing
+`warehouse/analytics.db` and capturing article changes in
+`warehouse/snapshot_history.db`. A failed fetch is retried twice and prevents
+dbt from building a partial daily refresh.
 
 Every fetch task requests a batch of up to 200 unseen records per daily run.
 This is not a 200-row database limit. WHO and Hacker News also refresh a
@@ -430,6 +469,45 @@ day policy above is used.
 SQLite reuses pages freed by deletion, so the database file may not immediately
 become smaller on disk. Neither the scheduled nor manual cleanup runs `VACUUM`.
 
+### Inspect ingestion runs
+
+Every fetch or watch-loop iteration writes an `ingestion_audit` record into the
+same raw SQLite database as its source data. The record includes the requested
+and selected row counts, newly inserted and refreshed rows, retention
+deletions, total database rows, oldest and newest valid publication times,
+articles published on that UTC date, and a `running`, `succeeded`, or `failed`
+status. Airflow passes one shared `pipeline_run_id` to all nine fetchers, while
+manual fetches receive a generated `manual:` run ID. Error messages are
+whitespace-normalized and limited to 2,000 characters.
+
+Campaigns and events do not have a reliable raw publication-time field, so
+their oldest, newest, and published-today metrics are intentionally null. Raw
+audit history is preserved automatically with the existing raw-database state
+snapshots.
+
+dbt unions all nine raw audit tables into `ops_mart_ingestion_runs` in
+`warehouse/analytics.db`. Build or refresh it and inspect recent runs with:
+
+```powershell
+dbt build --select +ops_mart_ingestion_runs --profiles-dir .
+sqlite3 -header -column warehouse/analytics.db "SELECT pipeline_run_id, source_name, status, new_rows, refreshed_rows, deleted_rows, total_rows, published_today_rows, oldest_published_at, newest_published_at FROM ops_mart_ingestion_runs ORDER BY started_at DESC LIMIT 30;"
+```
+
+If a scheduled fetch fails, dbt correctly skips the partial warehouse refresh.
+That failure is available immediately in the affected raw database and appears
+in the unified operations mart after the next successful dbt build. For
+example:
+
+```powershell
+sqlite3 -header -column tech_articles/tech_news.db "SELECT pipeline_run_id, status, error_type, error_message, started_at FROM ingestion_audit ORDER BY started_at DESC LIMIT 10;"
+```
+
+To create a one-time baseline for raw databases that predate auditing, run:
+
+```powershell
+python maintenance_scripts/ingestion_audit.py --run-id bootstrap
+```
+
 ### Run while your computer is off with GitHub Actions
 
 The workflow in `.github/workflows/daily-news.yml` runs the complete Airflow
@@ -439,12 +517,15 @@ started manually from the repository's **Actions** tab. Your computer and
 Docker Desktop do not need to be running.
 
 GitHub-hosted runners are temporary, so the workflow stores the nine raw SQLite
-databases as a validated `raw-sqlite-state` workflow artifact after a successful
-run. The next run restores that state before fetching. The snapshot
-uses SQLite's backup API, checks each database and expected table, and includes
-checksums in `manifest.json`. `warehouse/analytics.db` is deliberately rebuilt
-from raw data rather than restored, then uploaded with the latest JSON files as
-a separate `news-analytics-<run-id>` artifact.
+databases plus `warehouse/snapshot_history.db` as a validated
+`raw-sqlite-state` workflow artifact after a successful run. The next run
+restores that state before fetching. The state snapshot uses SQLite's backup
+API, checks each database and expected table, and includes checksums in
+`manifest.json`. Legacy state artifacts containing only the nine raw databases
+are still accepted once for migration. `warehouse/analytics.db` is deliberately
+rebuilt from raw data rather than restored, then it and the snapshot-history
+database are uploaded with the latest JSON files as a separate
+`news-analytics-<run-id>` artifact.
 
 To enable cloud scheduling:
 
@@ -458,8 +539,8 @@ To enable cloud scheduling:
 4. Download a completed analytics database from the workflow run's
    **Artifacts** section when needed.
 
-Raw state is retained for 90 days and downloadable analytics output for 14
-days. If no usable raw snapshot remains, manually run the workflow with
+Pipeline state is retained for 90 days and downloadable analytics output for
+14 days. If no usable state snapshot remains, manually run the workflow with
 `reset_state` enabled to bootstrap fresh cloud state. Scheduled GitHub Actions
 are best-effort rather than an exact-time service, and public-repository
 schedules can be disabled after 60 days without repository activity. For a
@@ -498,7 +579,8 @@ wsl --update --web-download
 The Airflow metadata is kept in the `airflow_home` Docker volume. Raw WHO data
 remains under `articles/`, raw Hacker News data remains under
 `tech_articles/`, raw economic news remains under `economic_articles/`, and
-dbt outputs are written to `warehouse/analytics.db`.
+dbt outputs are written to `warehouse/analytics.db` and
+`warehouse/snapshot_history.db`.
 
 ### Run directly in Linux or WSL2
 
@@ -536,7 +618,9 @@ for title, published_at, url in rows:
 The transformed dbt relations are stored separately in
 `warehouse/analytics.db`. For example, `who_mart_news_monthly_summary`,
 `tech_mart_daily_story_summary`, and `tech_mart_top_stories` can be queried
-from that database without modifying either raw source database.
+from that database without modifying either raw source database. Historical
+Tech and Economic article versions are stored in
+`warehouse/snapshot_history.db`.
 
 Official WHO API help: <https://www.who.int/api/news/newsitems/sfhelp>
 

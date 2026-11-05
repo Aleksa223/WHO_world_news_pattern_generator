@@ -44,3 +44,6 @@ sources:
               - accepted_values:
                   arguments:
                     values: [economic]
+      - name: ingestion_audit
+        description: >
+          Ingestion-run audit records stored beside the raw GDELT articles.

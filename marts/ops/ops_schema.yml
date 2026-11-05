@@ -1,0 +1,100 @@
+version: 2
+
+models:
+  - name: ops_mart_ingestion_runs
+    description: >
+      Operational history of ingestion attempts across all nine raw news
+      databases, including row changes, retention, freshness, and failures.
+    columns:
+      - name: audit_key
+        description: Globally unique key composed of the source name and audit ID.
+        data_tests:
+          - not_null
+          - unique
+      - name: audit_id
+        description: Identifier assigned to the audit attempt in its source database.
+        data_tests:
+          - not_null
+      - name: pipeline_run_id
+        description: Shared identifier for one pipeline or manual ingestion run.
+        data_tests:
+          - not_null
+      - name: attempt_number
+        description: Airflow attempt number when the ingestion ran under orchestration.
+      - name: source_name
+        description: Stable identifier for the ingested source.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - who_news
+                  - who_campaigns
+                  - who_commentaries
+                  - who_events
+                  - who_speeches
+                  - who_statements
+                  - who_stories
+                  - tech_news
+                  - economic_news
+      - name: source_table
+        description: Physical raw table measured by the audit attempt.
+        data_tests:
+          - not_null
+      - name: date_column
+        description: Publication-date column used for freshness metrics, when supported.
+      - name: status
+        description: Final or current state of the ingestion attempt.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [running, succeeded, failed, snapshot]
+      - name: started_at
+        description: UTC time at which the attempt started.
+        data_tests:
+          - not_null
+      - name: completed_at
+        description: UTC completion time; null only while an attempt is running.
+      - name: updated_at
+        description: UTC time at which the audit row was last updated.
+        data_tests:
+          - not_null
+      - name: metric_date_utc
+        description: UTC calendar date used to calculate published-today rows.
+        data_tests:
+          - not_null
+      - name: requested_limit
+        description: Maximum number of new records requested for the attempt.
+      - name: selected_rows
+        description: Number of source rows selected for saving during the attempt.
+      - name: new_rows
+        description: Number of newly inserted rows.
+        data_tests:
+          - not_null
+      - name: refreshed_rows
+        description: Number of existing rows refreshed by the attempt.
+        data_tests:
+          - not_null
+      - name: deleted_rows
+        description: Number of rows removed by retention after ingestion.
+        data_tests:
+          - not_null
+      - name: total_rows
+        description: Raw source row count when the audit was last updated.
+        data_tests:
+          - not_null
+      - name: oldest_published_at
+        description: Oldest valid publication timestamp in the raw table, when supported.
+      - name: newest_published_at
+        description: Newest valid publication timestamp in the raw table, when supported.
+      - name: published_today_rows
+        description: Rows published on metric_date_utc, or null for undated sources.
+      - name: retention_days
+        description: Retention period applied to this source, when configured.
+      - name: retention_cutoff_utc
+        description: Strict UTC deletion cutoff applied by retention, when configured.
+      - name: error_type
+        description: Exception class captured for a failed ingestion attempt.
+      - name: error_message
+        description: Sanitized exception message captured for a failed attempt.

@@ -14,6 +14,11 @@ from maintenance_scripts.cleanup_old_articles import (
     calculate_cutoff,
     cleanup_old_articles,
 )
+from maintenance_scripts.ingestion_audit import (
+    AUDIT_TABLE,
+    AuditTarget,
+    begin_ingestion_audit,
+)
 
 
 AS_OF = datetime(2026, 10, 16, 12, 0, 0, tzinfo=timezone.utc)
@@ -172,6 +177,7 @@ class CleanupOldArticlesTests(unittest.TestCase):
                 project_root,
                 as_of=AS_OF,
                 dry_run=True,
+                pipeline_run_id="dry-run-without-audit",
             )
 
             counts = []
@@ -186,9 +192,86 @@ class CleanupOldArticlesTests(unittest.TestCase):
                     )
 
         self.assertTrue(report["dry_run"])
+        self.assertEqual(report["pipeline_run_id"], "dry-run-without-audit")
         self.assertEqual(report["eligible_total"], 3)
         self.assertEqual(report["deleted_total"], 0)
         self.assertEqual(counts, [1, 1, 1])
+
+    def test_retention_updates_the_matching_ingestion_audit(self):
+        target = RetentionTarget(
+            name="who_news",
+            database="articles/who_news.db",
+            table="articles",
+            retention_days=365,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            database = create_target_database(
+                project_root,
+                target,
+                [
+                    ("old", "2020-01-01T00:00:00Z"),
+                    ("current", "2026-10-28T08:00:00Z"),
+                ],
+            )
+            audit = begin_ingestion_audit(
+                database,
+                AuditTarget("who_news", "articles", "published_at"),
+                pipeline_run_id="airflow-run",
+                now=AS_OF,
+            )
+            audit.set_changes(new_rows=1, refreshed_rows=1, selected_rows=2)
+            audit.succeed(now=AS_OF)
+
+            report = cleanup_old_articles(
+                project_root,
+                as_of=AS_OF,
+                pipeline_run_id="airflow-run",
+                targets=(target,),
+            )
+            with closing(sqlite3.connect(database)) as connection:
+                row = connection.execute(
+                    f"SELECT deleted_rows, total_rows, retention_days, "
+                    f"retention_cutoff_utc FROM {AUDIT_TABLE} "
+                    "WHERE audit_id = ?",
+                    (audit.audit_id,),
+                ).fetchone()
+
+        self.assertEqual(report["pipeline_run_id"], "airflow-run")
+        self.assertEqual(report["deleted_total"], 1)
+        self.assertEqual(
+            row,
+            (1, 1, 365, "2025-10-16T12:00:00Z"),
+        )
+
+    def test_missing_audit_link_rolls_back_retention_deletion(self):
+        target = RetentionTarget(
+            name="who_news",
+            database="articles/who_news.db",
+            table="articles",
+            retention_days=365,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            database = create_target_database(
+                project_root,
+                target,
+                [("old", "2020-01-01T00:00:00Z")],
+            )
+
+            with self.assertRaises(RetentionError):
+                cleanup_old_articles(
+                    project_root,
+                    as_of=AS_OF,
+                    pipeline_run_id="missing-run",
+                    targets=(target,),
+                )
+            with closing(sqlite3.connect(database)) as connection:
+                remaining = connection.execute(
+                    "SELECT COUNT(*) FROM articles"
+                ).fetchone()[0]
+
+        self.assertEqual(remaining, 1)
 
     def test_preflight_failure_does_not_delete_or_create_databases(self):
         with tempfile.TemporaryDirectory() as directory:

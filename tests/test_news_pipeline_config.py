@@ -45,11 +45,44 @@ class NewsPipelineConfigTests(unittest.TestCase):
     def test_fetch_jobs_have_unique_outputs_and_existing_scripts(self):
         databases = [job.database for job in ALL_FETCH_JOBS]
         outputs = [job.output for job in ALL_FETCH_JOBS]
+        source_names = [job.source_name for job in ALL_FETCH_JOBS]
 
         self.assertEqual(len(databases), len(set(databases)))
         self.assertEqual(len(outputs), len(set(outputs)))
+        self.assertEqual(len(source_names), len(set(source_names)))
         for job in ALL_FETCH_JOBS:
             self.assertTrue((PROJECT_ROOT / job.script).is_file(), job.script)
+
+    def test_fetch_jobs_define_their_audit_source_contracts(self):
+        self.assertEqual(
+            {
+                job.name: (job.source_name, job.table, job.date_column)
+                for job in ALL_FETCH_JOBS
+            },
+            {
+                "news": ("who_news", "articles", "published_at"),
+                "campaigns": ("who_campaigns", "campaigns", None),
+                "commentaries": (
+                    "who_commentaries",
+                    "commentaries",
+                    "published_at",
+                ),
+                "events": ("who_events", "events", None),
+                "speeches": ("who_speeches", "speeches", "published_at"),
+                "statements": (
+                    "who_statements",
+                    "statements",
+                    "published_at",
+                ),
+                "stories": ("who_stories", "feature_stories", "published_at"),
+                "tech_news": ("tech_news", "tech_articles", "published_at"),
+                "economic_news": (
+                    "economic_news",
+                    "economic_articles",
+                    "published_at",
+                ),
+            },
+        )
 
     def test_fetch_commands_use_absolute_project_paths(self):
         for job in ALL_FETCH_JOBS:
@@ -86,7 +119,13 @@ class NewsPipelineConfigTests(unittest.TestCase):
     def test_dbt_selection_refreshes_every_domain(self):
         self.assertEqual(
             DBT_NEWS_SELECTION,
-            ("path:staging", "path:intermediate", "path:marts", "path:seeds"),
+            (
+                "path:staging",
+                "path:intermediate",
+                "path:marts",
+                "path:seeds",
+                "path:snapshots",
+            ),
         )
 
 

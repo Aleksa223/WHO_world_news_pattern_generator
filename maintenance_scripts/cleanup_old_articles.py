@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -12,6 +13,23 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
+
+if __package__:
+    from .ingestion_audit import (
+        AUDIT_TABLE,
+        PIPELINE_RUN_ID_ENV,
+        AuditTarget,
+        IngestionAuditError,
+        apply_retention_audit,
+    )
+else:
+    from ingestion_audit import (  # type: ignore[no-redef]
+        AUDIT_TABLE,
+        PIPELINE_RUN_ID_ENV,
+        AuditTarget,
+        IngestionAuditError,
+        apply_retention_audit,
+    )
 
 
 DEFAULT_RETENTION_DAYS = 90
@@ -166,6 +184,31 @@ def _validate_schema(database: Path, target: RetentionTarget) -> None:
             )
 
 
+def _validate_audit_link(
+    database: Path,
+    target: RetentionTarget,
+    pipeline_run_id: str,
+) -> None:
+    with closing(_connect_existing(database)) as connection:
+        audit_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (AUDIT_TABLE,),
+        ).fetchone()
+        if audit_exists is None:
+            raise RetentionError(
+                f"Ingestion audit table is missing from {database}"
+            )
+        audit_row = connection.execute(
+            f"SELECT 1 FROM {AUDIT_TABLE} "
+            "WHERE pipeline_run_id = ? AND source_name = ? LIMIT 1",
+            (pipeline_run_id, target.name),
+        ).fetchone()
+        if audit_row is None:
+            raise RetentionError(
+                f"No audit row for {target.name!r} in run {pipeline_run_id!r}"
+            )
+
+
 def _clean_target(
     database: Path,
     target: RetentionTarget,
@@ -173,6 +216,8 @@ def _clean_target(
     *,
     retention_days: int,
     dry_run: bool,
+    pipeline_run_id: str | None,
+    as_of: datetime,
 ) -> RetentionResult:
     table = _quote_identifier(target.table)
     date_column = _quote_identifier(target.date_column)
@@ -209,11 +254,25 @@ def _clean_target(
         remaining = int(
             connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         )
+        if not dry_run and pipeline_run_id:
+            apply_retention_audit(
+                connection,
+                pipeline_run_id=pipeline_run_id,
+                target=AuditTarget(
+                    source_name=target.name,
+                    table=target.table,
+                    date_column=target.date_column,
+                ),
+                deleted_rows=deleted,
+                retention_days=retention_days,
+                cutoff_utc=cutoff_text,
+                as_of=as_of,
+            )
         if dry_run:
             connection.rollback()
         else:
             connection.commit()
-    except sqlite3.Error as exc:
+    except (IngestionAuditError, sqlite3.Error) as exc:
         connection.rollback()
         raise RetentionError(
             f"Could not apply retention to {database}:{target.table}: {exc}"
@@ -241,10 +300,12 @@ def cleanup_old_articles(
     retention_days: int | None = None,
     as_of: datetime | None = None,
     dry_run: bool = False,
+    pipeline_run_id: str | None = None,
     targets: Sequence[RetentionTarget] = RETENTION_TARGETS,
 ) -> dict[str, object]:
     """Apply each target's policy, or one explicit override, to all targets."""
     as_of_utc = _utc_datetime(as_of)
+    pipeline_run_id = (pipeline_run_id or "").strip() or None
     if retention_days is not None and retention_days <= 0:
         raise ValueError("retention_days must be greater than zero")
 
@@ -271,6 +332,8 @@ def cleanup_old_articles(
     # Validate every target before deleting from any of them.
     for target, database, _, _ in resolved_targets:
         _validate_schema(database, target)
+        if pipeline_run_id and not dry_run:
+            _validate_audit_link(database, target, pipeline_run_id)
 
     results = [
         _clean_target(
@@ -279,6 +342,8 @@ def cleanup_old_articles(
             cutoff,
             retention_days=effective_retention_days,
             dry_run=dry_run,
+            pipeline_run_id=pipeline_run_id,
+            as_of=as_of_utc,
         )
         for target, database, effective_retention_days, cutoff in resolved_targets
     ]
@@ -286,6 +351,7 @@ def cleanup_old_articles(
         "retention_days_override": retention_days,
         "as_of_utc": _format_utc(as_of_utc),
         "dry_run": dry_run,
+        "pipeline_run_id": pipeline_run_id,
         "eligible_total": sum(result.eligible for result in results),
         "deleted_total": sum(result.deleted for result in results),
         "databases": [asdict(result) for result in results],
@@ -332,6 +398,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="report eligible rows without deleting them",
     )
+    parser.add_argument(
+        "--pipeline-run-id",
+        default=os.environ.get(PIPELINE_RUN_ID_ENV),
+        help=(
+            "optional ingestion run identifier whose audit rows receive "
+            "retention metrics (default: NEWS_PIPELINE_RUN_ID)"
+        ),
+    )
     return parser
 
 
@@ -343,6 +417,7 @@ def main(argv: list[str] | None = None) -> int:
             retention_days=args.retention_days,
             as_of=args.as_of,
             dry_run=args.dry_run,
+            pipeline_run_id=args.pipeline_run_id,
         )
     except (RetentionError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
