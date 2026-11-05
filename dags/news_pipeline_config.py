@@ -60,6 +60,7 @@ WHO_FETCH_JOBS = (
         output="articles/who_latest_events.json",
         table="events",
         date_column=None,
+        extra_args=("--allow-stale-on-fetch-error",),
     ),
     FetchJob(
         name="speeches",

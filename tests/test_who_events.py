@@ -1,8 +1,9 @@
 import io
+import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -183,6 +184,138 @@ class SaveEventsTests(unittest.TestCase):
                 "2026-09-10T16:00:00+00:00",
             ),
         )
+
+
+class EventsCliTests(unittest.TestCase):
+    def test_default_contract(self):
+        args = who_events.build_parser().parse_args([])
+
+        self.assertEqual(args.limit, 10)
+        self.assertEqual(args.database, Path("articles/who_event_news.db"))
+        self.assertFalse(args.allow_stale_on_fetch_error)
+
+    @patch("who_news_scripts.who_events.fetch_events")
+    def test_scheduled_cli_writes_cached_output_after_fetch_error(
+        self, mocked_fetch
+    ):
+        mocked_fetch.side_effect = who_events.WhoEventsFetchError(
+            "WHO returned HTTP 400 for the Events page"
+        )
+        stderr = io.StringIO()
+        cached_item = {
+            "id": "2026/10/01/default-calendar/example",
+            "title": "Cached event",
+            "event_type": "Events",
+            "date_text": "1 October 2026",
+            "url": (
+                "https://www.who.int/news-room/events/detail/"
+                "2026/10/01/default-calendar/example"
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "who-event-news.db"
+            output = Path(directory) / "who-latest-events.json"
+            who_events.save_events(
+                database,
+                {
+                    "fetched_at": "2026-10-15T10:00:00+00:00",
+                    "items": [cached_item],
+                },
+            )
+
+            with redirect_stderr(stderr):
+                result = who_events.main(
+                    [
+                        "--database",
+                        str(database),
+                        "--output",
+                        str(output),
+                        "--allow-stale-on-fetch-error",
+                    ]
+                )
+
+            fallback_output = json.loads(output.read_text(encoding="utf-8"))
+            with closing(sqlite3.connect(database)) as connection:
+                audit_row = connection.execute(
+                    """
+                    SELECT status, error_type, total_rows
+                    FROM ingestion_audit
+                    ORDER BY rowid DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                event_count = connection.execute(
+                    "SELECT COUNT(*) FROM events"
+                ).fetchone()[0]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(event_count, 1)
+        self.assertEqual(audit_row, ("failed", "WhoEventsFetchError", 1))
+        self.assertTrue(fallback_output["stale"])
+        self.assertEqual(fallback_output["items"], [cached_item])
+        self.assertIn("HTTP 400", fallback_output["fallback_error"])
+        self.assertIn("retaining cached WHO events", stderr.getvalue())
+
+    @patch("who_news_scripts.who_events.fetch_events")
+    def test_scheduled_cli_fails_without_cached_events(self, mocked_fetch):
+        mocked_fetch.side_effect = who_events.WhoEventsFetchError(
+            "WHO returned HTTP 400 for the Events page"
+        )
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "who-event-news.db"
+            output = Path(directory) / "who-latest-events.json"
+            with redirect_stderr(stderr):
+                result = who_events.main(
+                    [
+                        "--database",
+                        str(database),
+                        "--output",
+                        str(output),
+                        "--allow-stale-on-fetch-error",
+                    ]
+                )
+
+            with closing(sqlite3.connect(database)) as connection:
+                audit_status = connection.execute(
+                    "SELECT status FROM ingestion_audit"
+                ).fetchone()[0]
+
+        self.assertEqual(result, 1)
+        self.assertEqual(audit_status, "failed")
+        self.assertFalse(output.exists())
+        self.assertIn("error: WHO returned HTTP 400", stderr.getvalue())
+
+    @patch("who_news_scripts.who_events.save_events")
+    @patch("who_news_scripts.who_events.fetch_events")
+    def test_scheduled_cli_does_not_hide_database_save_errors(
+        self, mocked_fetch, mocked_save
+    ):
+        mocked_fetch.return_value = {
+            "count": 0,
+            "pages_scanned": 1,
+            "items": [],
+        }
+        mocked_save.side_effect = who_events.WhoEventsError(
+            "Could not save Events"
+        )
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "who-event-news.db"
+            with redirect_stderr(stderr):
+                result = who_events.main(
+                    [
+                        "--database",
+                        str(database),
+                        "--allow-stale-on-fetch-error",
+                    ]
+                )
+
+        self.assertEqual(result, 1)
+        self.assertIn("error: Could not save Events", stderr.getvalue())
 
 
 if __name__ == "__main__":

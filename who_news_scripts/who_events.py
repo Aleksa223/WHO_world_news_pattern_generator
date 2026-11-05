@@ -61,6 +61,10 @@ class WhoEventsError(RuntimeError):
     """Raised when WHO events cannot be downloaded, parsed, or saved."""
 
 
+class WhoEventsFetchError(WhoEventsError):
+    """Raised when WHO's event listing cannot be downloaded or parsed."""
+
+
 def _who_path(href: str | None) -> str | None:
     if not href:
         return None
@@ -175,13 +179,19 @@ def _fetch_page(page_number: int, timeout: int) -> str:
         with urlopen(request, timeout=timeout) as response:
             return response.read().decode("utf-8")
     except HTTPError as exc:
-        raise WhoEventsError(f"WHO returned HTTP {exc.code}") from exc
+        raise WhoEventsFetchError(
+            f"WHO returned HTTP {exc.code} for {url}"
+        ) from exc
     except URLError as exc:
-        raise WhoEventsError(f"Could not connect to WHO: {exc.reason}") from exc
+        raise WhoEventsFetchError(
+            f"Could not connect to WHO: {exc.reason}"
+        ) from exc
     except TimeoutError as exc:
-        raise WhoEventsError("WHO request timed out") from exc
+        raise WhoEventsFetchError("WHO request timed out") from exc
     except UnicodeDecodeError as exc:
-        raise WhoEventsError("WHO returned an invalid text response") from exc
+        raise WhoEventsFetchError(
+            "WHO returned an invalid text response"
+        ) from exc
 
 
 def fetch_events(
@@ -205,7 +215,9 @@ def fetch_events(
         pages_scanned += 1
         events, page_numbers = _parse_events(page)
         if page_number == 1 and not events:
-            raise WhoEventsError("WHO events page contained no event cards")
+            raise WhoEventsFetchError(
+                "WHO events page contained no event cards"
+            )
         if page_numbers:
             last_page = min(max(page_numbers), MAX_EVENT_PAGES)
 
@@ -350,6 +362,70 @@ def _write_json(data: dict[str, Any], output: Path | None) -> None:
     print(f"Saved {data['count']} WHO Events to {output}")
 
 
+def _load_cached_events(
+    database: Path,
+    *,
+    limit: int,
+) -> dict[str, Any] | None:
+    """Build a latest-run payload from reusable WHO events."""
+    if not database.is_file():
+        return None
+    try:
+        uri = f"{database.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
+            table_exists = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'events'
+                """
+            ).fetchone()
+            if table_exists is None:
+                return None
+            rows = connection.execute(
+                """
+                SELECT
+                    id, title, event_type, date_text, url, last_seen_at
+                FROM events
+                ORDER BY last_seen_at DESC, id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            if not rows:
+                return None
+
+            items = [
+                {
+                    key: row[key]
+                    for key in ("id", "title", "event_type", "date_text", "url")
+                }
+                for row in rows
+            ]
+            cache_last_seen_at = max(str(row["last_seen_at"]) for row in rows)
+            return {
+                "source": WHO_EVENTS_URL,
+                "event_type": EVENT_TYPE,
+                "fetched_at": cache_last_seen_at,
+                "cache_last_seen_at": cache_last_seen_at,
+                "fallback_generated_at": datetime.now(timezone.utc).isoformat(),
+                "stale": True,
+                "count": len(items),
+                "unseen_count": 0,
+                "refreshed_count": 0,
+                "existing_encountered": len(items),
+                "skipped_existing": len(items),
+                "scanned": len(items),
+                "pages_scanned": 0,
+                "items": items,
+            }
+    except (OSError, sqlite3.Error) as exc:
+        raise WhoEventsError(
+            f"Could not inspect cached WHO events in {database}: {exc}"
+        ) from exc
+
+
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -388,6 +464,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="keep refreshing at this interval until Ctrl+C is pressed",
     )
+    parser.add_argument(
+        "--allow-stale-on-fetch-error",
+        action="store_true",
+        help=(
+            "return successfully after a WHO Events fetch failure only when "
+            "the database already contains events"
+        ),
+    )
     return parser
 
 
@@ -399,30 +483,48 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            with begin_ingestion_audit(
-                args.database,
-                AUDIT_TARGET,
-                requested_limit=args.limit,
-            ) as audit:
-                existing_ids = load_existing_ids(args.database, "events")
-                data = fetch_events(
+            try:
+                with begin_ingestion_audit(
+                    args.database,
+                    AUDIT_TARGET,
+                    requested_limit=args.limit,
+                ) as audit:
+                    existing_ids = load_existing_ids(args.database, "events")
+                    data = fetch_events(
+                        limit=args.limit,
+                        timeout=args.timeout,
+                        existing_ids=existing_ids,
+                    )
+                    saved = save_events(args.database, data)
+                    audit.set_changes(
+                        new_rows=saved["inserted"],
+                        refreshed_rows=saved["updated"],
+                        selected_rows=saved["total"],
+                    )
+                    print(
+                        f"Database {args.database}: {saved['inserted']} inserted, "
+                        f"{saved['updated']} updated, {saved['staged']} staged "
+                        f"({data['pages_scanned']} event pages scanned)",
+                        file=sys.stderr,
+                    )
+                    _write_json(data, args.output)
+            except WhoEventsFetchError as exc:
+                if not args.allow_stale_on_fetch_error:
+                    raise
+                cached = _load_cached_events(
+                    args.database,
                     limit=args.limit,
-                    timeout=args.timeout,
-                    existing_ids=existing_ids,
                 )
-                saved = save_events(args.database, data)
-                audit.set_changes(
-                    new_rows=saved["inserted"],
-                    refreshed_rows=saved["updated"],
-                    selected_rows=saved["total"],
-                )
+                if cached is None:
+                    raise
+                cached["fallback_error"] = str(exc)
+                _write_json(cached, args.output)
                 print(
-                    f"Database {args.database}: {saved['inserted']} inserted, "
-                    f"{saved['updated']} updated, {saved['staged']} staged "
-                    f"({data['pages_scanned']} event pages scanned)",
+                    f"warning: {exc}; retaining cached WHO events from "
+                    f"{args.database}. The failed fetch remains in the "
+                    "ingestion audit.",
                     file=sys.stderr,
                 )
-                _write_json(data, args.output)
             if args.watch is None:
                 return 0
             time.sleep(args.watch)

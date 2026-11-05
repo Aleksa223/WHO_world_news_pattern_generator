@@ -746,13 +746,20 @@ def _write_json(data: dict[str, Any], output: Path | None) -> None:
     print(f"Saved {data['count']} economic-news articles to {output}")
 
 
-def _has_cached_articles(database: Path) -> bool:
-    """Return whether an existing database has reusable economic articles."""
+def _load_cached_economic_news(
+    database: Path,
+    *,
+    limit: int,
+    query: str,
+    timespan: str,
+) -> dict[str, Any] | None:
+    """Build a latest-run payload from reusable economic articles."""
     if not database.is_file():
-        return False
+        return None
     try:
         uri = f"{database.resolve().as_uri()}?mode=ro"
         with closing(sqlite3.connect(uri, uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
             table_exists = connection.execute(
                 """
                 SELECT 1
@@ -761,13 +768,88 @@ def _has_cached_articles(database: Path) -> bool:
                 """
             ).fetchone()
             if table_exists is None:
-                return False
-            return (
-                connection.execute(
-                    "SELECT 1 FROM economic_articles LIMIT 1"
-                ).fetchone()
-                is not None
-            )
+                return None
+            rows = connection.execute(
+                """
+                SELECT
+                    id, provider, item_type, title, description, keywords,
+                    snippet, url, mobile_url, image_url, language,
+                    published_at, gdelt_seen_at, gdelt_seen_date, source,
+                    source_country, feed, feed_rank, query, category,
+                    categories_json, last_seen_at
+                FROM economic_articles
+                ORDER BY
+                    COALESCE(
+                        julianday(published_at),
+                        julianday(gdelt_seen_at),
+                        julianday(last_seen_at)
+                    ) DESC,
+                    last_seen_at DESC,
+                    id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            if not rows:
+                return None
+
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                try:
+                    categories = json.loads(str(row["categories_json"]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    categories = [ECONOMIC_CATEGORY]
+                items.append(
+                    {
+                        key: row[key]
+                        for key in (
+                            "id",
+                            "provider",
+                            "item_type",
+                            "title",
+                            "description",
+                            "keywords",
+                            "snippet",
+                            "url",
+                            "mobile_url",
+                            "image_url",
+                            "language",
+                            "published_at",
+                            "gdelt_seen_at",
+                            "gdelt_seen_date",
+                            "source",
+                            "source_country",
+                            "feed",
+                            "feed_rank",
+                            "query",
+                            "category",
+                        )
+                    }
+                )
+                items[-1]["categories"] = categories
+
+            effective_query = _english_only_query(query)
+            cache_last_seen_at = max(str(row["last_seen_at"]) for row in rows)
+            return {
+                "source": _build_request_url(
+                    effective_query,
+                    limit,
+                    timespan,
+                ),
+                "provider": GDELT_PROVIDER,
+                "feed": "gdelt_doc",
+                "query": effective_query,
+                "timespan": timespan,
+                "category": ECONOMIC_CATEGORY,
+                "fetched_at": cache_last_seen_at,
+                "cache_last_seen_at": cache_last_seen_at,
+                "fallback_generated_at": datetime.now(timezone.utc).isoformat(),
+                "stale": True,
+                "count": len(items),
+                "available": len(items),
+                "skipped": 0,
+                "items": items,
+            }
     except (OSError, sqlite3.Error) as exc:
         raise EconomicNewsError(
             f"Could not inspect cached economic news in {database}: {exc}"
@@ -930,10 +1012,18 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     _write_json(data, args.output)
             except GdeltRateLimitError as exc:
-                if not args.allow_stale_on_rate_limit or not _has_cached_articles(
-                    args.database
-                ):
+                if not args.allow_stale_on_rate_limit:
                     raise
+                cached = _load_cached_economic_news(
+                    args.database,
+                    limit=args.limit,
+                    query=args.query,
+                    timespan=args.timespan,
+                )
+                if cached is None:
+                    raise
+                cached["fallback_error"] = str(exc)
+                _write_json(cached, args.output)
                 print(
                     f"warning: {exc}; retaining cached economic articles from "
                     f"{args.database}. The failed fetch remains in the ingestion "

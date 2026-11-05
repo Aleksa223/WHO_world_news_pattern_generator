@@ -123,6 +123,20 @@ class NewsPipelineConfigTests(unittest.TestCase):
         self.assertNotIn("--translate", economic_command)
         self.assertNotIn("--watch", economic_command)
 
+    def test_events_fetch_can_retain_a_valid_cache_on_source_failure(self):
+        events_job = next(job for job in WHO_FETCH_JOBS if job.name == "events")
+        events_command = build_fetch_command(
+            events_job, PROJECT_ROOT, "python-for-test"
+        )
+
+        self.assertIn("--allow-stale-on-fetch-error", events_command)
+        for job in WHO_FETCH_JOBS:
+            if job.name != "events":
+                self.assertNotIn(
+                    "--allow-stale-on-fetch-error",
+                    build_fetch_command(job, PROJECT_ROOT, "python-for-test"),
+                )
+
     def test_dbt_selection_refreshes_every_domain(self):
         self.assertEqual(
             DBT_NEWS_SELECTION,

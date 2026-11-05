@@ -431,6 +431,7 @@ class EconomicNewsCliTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "economic-news.db"
+            output = Path(directory) / "economic-news.json"
             economic_news.save_economic_news(
                 database,
                 {
@@ -445,9 +446,13 @@ class EconomicNewsCliTests(unittest.TestCase):
                     [
                         "--database",
                         str(database),
+                        "--output",
+                        str(output),
                         "--allow-stale-on-rate-limit",
                     ]
                 )
+
+            fallback_output = json.loads(output.read_text(encoding="utf-8"))
 
             with closing(sqlite3.connect(database)) as connection:
                 audit_row = connection.execute(
@@ -465,6 +470,10 @@ class EconomicNewsCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(article_count, 1)
         self.assertEqual(audit_row, ("failed", "GdeltRateLimitError", 1))
+        self.assertTrue(fallback_output["stale"])
+        self.assertEqual(fallback_output["count"], 1)
+        self.assertEqual(fallback_output["items"][0]["id"], saved_article(1)["id"])
+        self.assertIn("rate limit", fallback_output["fallback_error"])
         self.assertIn("retaining cached economic articles", stderr.getvalue())
 
     @patch("economic_news_scripts.economic_news.fetch_economic_news")
@@ -476,11 +485,14 @@ class EconomicNewsCliTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "economic-news.db"
+            output = Path(directory) / "economic-news.json"
             with redirect_stderr(stderr):
                 result = economic_news.main(
                     [
                         "--database",
                         str(database),
+                        "--output",
+                        str(output),
                         "--allow-stale-on-rate-limit",
                     ]
                 )
@@ -492,6 +504,7 @@ class EconomicNewsCliTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertEqual(audit_status, "failed")
+        self.assertFalse(output.exists())
         self.assertIn("error: The GDELT API rate limit", stderr.getvalue())
 
 
