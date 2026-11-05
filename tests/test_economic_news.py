@@ -196,8 +196,33 @@ class FetchEconomicNewsTests(unittest.TestCase):
         with self.assertRaises(economic_news.EconomicNewsError):
             economic_news.fetch_economic_news(limit=1)
 
+    @patch("economic_news_scripts.economic_news.time.sleep")
     @patch("economic_news_scripts.economic_news.urlopen")
-    def test_reports_gdelt_http_error(self, mocked_urlopen):
+    def test_retries_gdelt_rate_limit_then_succeeds(
+        self, mocked_urlopen, mocked_sleep
+    ):
+        mocked_urlopen.side_effect = [
+            HTTPError(
+                url=economic_news.GDELT_DOC_API_URL,
+                code=429,
+                msg="Too Many Requests",
+                hdrs=None,
+                fp=None,
+            ),
+            FakeResponse({"articles": [gdelt_article(1)]}),
+        ]
+
+        result = economic_news.fetch_economic_news(limit=1)
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(mocked_urlopen.call_count, 2)
+        mocked_sleep.assert_called_once_with(5)
+
+    @patch("economic_news_scripts.economic_news.time.sleep")
+    @patch("economic_news_scripts.economic_news.urlopen")
+    def test_reports_gdelt_rate_limit_after_bounded_retries(
+        self, mocked_urlopen, mocked_sleep
+    ):
         mocked_urlopen.side_effect = HTTPError(
             url=economic_news.GDELT_DOC_API_URL,
             code=429,
@@ -206,10 +231,35 @@ class FetchEconomicNewsTests(unittest.TestCase):
             fp=None,
         )
 
-        with self.assertRaises(economic_news.EconomicNewsError) as context:
+        with self.assertRaises(economic_news.GdeltRateLimitError) as context:
             economic_news.fetch_economic_news(limit=1)
 
         self.assertIn("rate limit was reached", str(context.exception))
+        self.assertEqual(mocked_urlopen.call_count, 4)
+        self.assertEqual(
+            [call.args[0] for call in mocked_sleep.call_args_list],
+            [5, 10, 20],
+        )
+
+    @patch("economic_news_scripts.economic_news.time.sleep")
+    @patch("economic_news_scripts.economic_news.urlopen")
+    def test_does_not_retry_non_rate_limit_http_errors(
+        self, mocked_urlopen, mocked_sleep
+    ):
+        mocked_urlopen.side_effect = HTTPError(
+            url=economic_news.GDELT_DOC_API_URL,
+            code=500,
+            msg="Server Error",
+            hdrs=None,
+            fp=None,
+        )
+
+        with self.assertRaises(economic_news.EconomicNewsError) as context:
+            economic_news.fetch_economic_news(limit=1)
+
+        self.assertIn("HTTP 500", str(context.exception))
+        mocked_urlopen.assert_called_once()
+        mocked_sleep.assert_not_called()
 
     def test_rejects_invalid_arguments(self):
         with self.assertRaises(ValueError):
@@ -327,6 +377,7 @@ class EconomicNewsCliTests(unittest.TestCase):
         self.assertEqual(args.database, Path("economic_articles/economic_news.db"))
         self.assertEqual(args.query, economic_news.DEFAULT_QUERY)
         self.assertEqual(args.timespan, "1d")
+        self.assertFalse(args.allow_stale_on_rate_limit)
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             economic_news.build_parser().parse_args(["--watch", "4"])
 
@@ -368,6 +419,80 @@ class EconomicNewsCliTests(unittest.TestCase):
         )
         mocked_write.assert_called_once()
         self.assertNotIn("token", stderr.getvalue().casefold())
+
+    @patch("economic_news_scripts.economic_news.fetch_economic_news")
+    def test_scheduled_cli_retains_cached_data_after_rate_limit(
+        self, mocked_fetch
+    ):
+        mocked_fetch.side_effect = economic_news.GdeltRateLimitError(
+            "The GDELT API rate limit was reached after 4 attempts"
+        )
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "economic-news.db"
+            economic_news.save_economic_news(
+                database,
+                {
+                    "query": economic_news.DEFAULT_QUERY,
+                    "fetched_at": "2026-10-15T10:00:00+00:00",
+                    "items": [saved_article(1)],
+                },
+            )
+
+            with redirect_stderr(stderr):
+                result = economic_news.main(
+                    [
+                        "--database",
+                        str(database),
+                        "--allow-stale-on-rate-limit",
+                    ]
+                )
+
+            with closing(sqlite3.connect(database)) as connection:
+                audit_row = connection.execute(
+                    """
+                    SELECT status, error_type, total_rows
+                    FROM ingestion_audit
+                    ORDER BY rowid DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                article_count = connection.execute(
+                    "SELECT COUNT(*) FROM economic_articles"
+                ).fetchone()[0]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(article_count, 1)
+        self.assertEqual(audit_row, ("failed", "GdeltRateLimitError", 1))
+        self.assertIn("retaining cached economic articles", stderr.getvalue())
+
+    @patch("economic_news_scripts.economic_news.fetch_economic_news")
+    def test_scheduled_cli_fails_without_cached_data(self, mocked_fetch):
+        mocked_fetch.side_effect = economic_news.GdeltRateLimitError(
+            "The GDELT API rate limit was reached after 4 attempts"
+        )
+        stderr = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "economic-news.db"
+            with redirect_stderr(stderr):
+                result = economic_news.main(
+                    [
+                        "--database",
+                        str(database),
+                        "--allow-stale-on-rate-limit",
+                    ]
+                )
+
+            with closing(sqlite3.connect(database)) as connection:
+                audit_status = connection.execute(
+                    "SELECT status FROM ingestion_audit"
+                ).fetchone()[0]
+
+        self.assertEqual(result, 1)
+        self.assertEqual(audit_status, "failed")
+        self.assertIn("error: The GDELT API rate limit", stderr.getvalue())
 
 
 if __name__ == "__main__":

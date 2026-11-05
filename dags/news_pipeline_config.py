@@ -107,7 +107,13 @@ ECONOMIC_FETCH_JOBS = (
         database="economic_articles/economic_news.db",
         output="economic_articles/economic_news.json",
         table="economic_articles",
-        extra_args=("--timespan", "1d", "--timeout", "30"),
+        extra_args=(
+            "--timespan",
+            "1d",
+            "--timeout",
+            "30",
+            "--allow-stale-on-rate-limit",
+        ),
     ),
 )
 

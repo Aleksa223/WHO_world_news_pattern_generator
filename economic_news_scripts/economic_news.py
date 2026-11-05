@@ -47,6 +47,8 @@ DEFAULT_TIMESPAN = "1d"
 DEFAULT_TIMEOUT = 30
 DEFAULT_LIMIT = 200
 MAX_ARTICLES = 250
+GDELT_RATE_LIMIT_RETRIES = 3
+GDELT_RATE_LIMIT_MIN_DELAY_SECONDS = 5
 DEFAULT_DATABASE = Path("economic_articles/economic_news.db")
 AUDIT_TARGET = AuditTarget(
     source_name="economic_news",
@@ -70,6 +72,10 @@ _TRACKING_QUERY_KEYS = {
 
 class EconomicNewsError(RuntimeError):
     """Raised when economic news cannot be downloaded, parsed, or saved."""
+
+
+class GdeltRateLimitError(EconomicNewsError):
+    """Raised after bounded retries cannot clear GDELT's rate limit."""
 
 
 def _clean_text(value: Any) -> str | None:
@@ -208,26 +214,34 @@ def _request_json(url: str, timeout: int) -> Any:
             "User-Agent": "who-world-news/1.0 (+economic news pipeline)",
         },
     )
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.load(response)
-    except HTTPError as exc:
-        if exc.code == 429:
+    for attempt in range(GDELT_RATE_LIMIT_RETRIES + 1):
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return json.load(response)
+        except HTTPError as exc:
+            if exc.code != 429:
+                raise EconomicNewsError(
+                    f"GDELT API returned HTTP {exc.code} for {url}"
+                ) from exc
+            if attempt == GDELT_RATE_LIMIT_RETRIES:
+                raise GdeltRateLimitError(
+                    "The GDELT API rate limit was reached after "
+                    f"{attempt + 1} attempts"
+                ) from exc
+            delay = GDELT_RATE_LIMIT_MIN_DELAY_SECONDS * (2**attempt)
+            time.sleep(delay)
+        except URLError as exc:
             raise EconomicNewsError(
-                "The GDELT API rate limit was reached; wait at least "
-                "five seconds before retrying"
+                f"Could not connect to the GDELT API: {exc.reason}"
             ) from exc
-        raise EconomicNewsError(
-            f"GDELT API returned HTTP {exc.code} for {url}"
-        ) from exc
-    except URLError as exc:
-        raise EconomicNewsError(
-            f"Could not connect to the GDELT API: {exc.reason}"
-        ) from exc
-    except TimeoutError as exc:
-        raise EconomicNewsError("The GDELT API request timed out") from exc
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise EconomicNewsError("The GDELT API returned invalid JSON") from exc
+        except TimeoutError as exc:
+            raise EconomicNewsError("The GDELT API request timed out") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise EconomicNewsError(
+                "The GDELT API returned invalid JSON"
+            ) from exc
+
+    raise AssertionError("unreachable")
 
 
 def _normalize_article(
@@ -732,6 +746,34 @@ def _write_json(data: dict[str, Any], output: Path | None) -> None:
     print(f"Saved {data['count']} economic-news articles to {output}")
 
 
+def _has_cached_articles(database: Path) -> bool:
+    """Return whether an existing database has reusable economic articles."""
+    if not database.is_file():
+        return False
+    try:
+        uri = f"{database.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            table_exists = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'economic_articles'
+                """
+            ).fetchone()
+            if table_exists is None:
+                return False
+            return (
+                connection.execute(
+                    "SELECT 1 FROM economic_articles LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+    except (OSError, sqlite3.Error) as exc:
+        raise EconomicNewsError(
+            f"Could not inspect cached economic news in {database}: {exc}"
+        ) from exc
+
+
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -827,6 +869,14 @@ def build_parser() -> argparse.ArgumentParser:
             "each fetch"
         ),
     )
+    parser.add_argument(
+        "--allow-stale-on-rate-limit",
+        action="store_true",
+        help=(
+            "return successfully after a GDELT rate-limit failure only when "
+            "the database already contains economic articles"
+        ),
+    )
     return parser
 
 
@@ -841,42 +891,55 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while True:
-            with begin_ingestion_audit(
-                args.database,
-                AUDIT_TARGET,
-                requested_limit=args.limit,
-            ) as audit:
-                data = fetch_economic_news(
-                    limit=args.limit,
-                    timeout=args.timeout,
-                    query=args.query,
-                    timespan=args.timespan,
-                )
-                saved = save_economic_news(args.database, data)
-                audit.set_changes(
-                    new_rows=saved["inserted"],
-                    refreshed_rows=saved["updated"],
-                    selected_rows=saved["total"],
-                )
-                print(
-                    f"Database {args.database}: {saved['inserted']} inserted, "
-                    f"{saved['updated']} updated, {saved['staged']} staged "
-                    f"({data['available']} results returned, "
-                    f"{data['skipped']} skipped)",
-                    file=sys.stderr,
-                )
-                if args.translate:
-                    translated = _translate_saved_titles(
-                        args.database,
-                        args.timeout,
+            try:
+                with begin_ingestion_audit(
+                    args.database,
+                    AUDIT_TARGET,
+                    requested_limit=args.limit,
+                ) as audit:
+                    data = fetch_economic_news(
+                        limit=args.limit,
+                        timeout=args.timeout,
+                        query=args.query,
+                        timespan=args.timespan,
+                    )
+                    saved = save_economic_news(args.database, data)
+                    audit.set_changes(
+                        new_rows=saved["inserted"],
+                        refreshed_rows=saved["updated"],
+                        selected_rows=saved["total"],
                     )
                     print(
-                        f"Azure Translator: {translated['translated']} titles "
-                        f"translated, {translated['stale']} stale updates skipped "
-                        f"({translated['selected']} pending titles selected)",
+                        f"Database {args.database}: {saved['inserted']} inserted, "
+                        f"{saved['updated']} updated, {saved['staged']} staged "
+                        f"({data['available']} results returned, "
+                        f"{data['skipped']} skipped)",
                         file=sys.stderr,
                     )
-                _write_json(data, args.output)
+                    if args.translate:
+                        translated = _translate_saved_titles(
+                            args.database,
+                            args.timeout,
+                        )
+                        print(
+                            f"Azure Translator: {translated['translated']} "
+                            f"titles translated, {translated['stale']} stale "
+                            "updates skipped "
+                            f"({translated['selected']} pending titles selected)",
+                            file=sys.stderr,
+                        )
+                    _write_json(data, args.output)
+            except GdeltRateLimitError as exc:
+                if not args.allow_stale_on_rate_limit or not _has_cached_articles(
+                    args.database
+                ):
+                    raise
+                print(
+                    f"warning: {exc}; retaining cached economic articles from "
+                    f"{args.database}. The failed fetch remains in the ingestion "
+                    "audit.",
+                    file=sys.stderr,
+                )
             if args.watch is None:
                 return 0
             time.sleep(args.watch)

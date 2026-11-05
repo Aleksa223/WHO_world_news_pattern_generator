@@ -111,7 +111,14 @@ class NewsPipelineConfigTests(unittest.TestCase):
 
         self.assertEqual(tech_command[-4:], ["--timeout", "30", "--workers", "16"])
         self.assertEqual(
-            economic_command[-4:], ["--timespan", "1d", "--timeout", "30"]
+            economic_command[-5:],
+            [
+                "--timespan",
+                "1d",
+                "--timeout",
+                "30",
+                "--allow-stale-on-rate-limit",
+            ],
         )
         self.assertNotIn("--translate", economic_command)
         self.assertNotIn("--watch", economic_command)
