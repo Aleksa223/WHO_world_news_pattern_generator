@@ -23,16 +23,17 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
       RESTORED_STATE_DIRECTORY: /tmp/restored-raw-sqlite-state
+      SOURCE_STATE_DIRECTORY: /tmp/source-raw-sqlite-state
       PUBLISHED_STATE_DIRECTORY: /tmp/published-raw-sqlite-state
 
     steps:
       - name: Check out the default branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Restore the latest successful pipeline database state
+      - name: Restore the latest published pipeline database state
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -51,31 +52,33 @@ jobs:
             exit 0
           fi
 
-          latest_run_id="$(
+          candidate_run_ids="$(
             gh run list \
               --workflow daily-news.yml \
               --branch "${DEFAULT_BRANCH}" \
-              --status success \
-              --limit 1 \
+              --limit 100 \
               --json databaseId \
-              --jq '.[0].databaseId // empty'
-          )"
-
-          if [[ -z "${latest_run_id}" ]]; then
-            echo "No earlier successful run exists; bootstrapping fresh databases."
-            exit 0
+              --jq '.[].databaseId'
+          )
+          latest_run_id=""
+          if [[ -n "${candidate_run_ids}" ]]; then
+            while IFS= read -r candidate_run_id; do
+              [[ -z "${candidate_run_id}" ]] && continue
+              artifact_id="$(
+                gh api \
+                  "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}/artifacts" \
+                  --jq '[.artifacts[] | select(.name == "raw-sqlite-state" and .expired == false)][0].id // empty'
+              )"
+              if [[ -n "${artifact_id}" ]]; then
+                latest_run_id="${candidate_run_id}"
+                break
+              fi
+            done <<< "${candidate_run_ids}"
           fi
 
-          artifact_id="$(
-            gh api \
-              "repos/${GITHUB_REPOSITORY}/actions/runs/${latest_run_id}/artifacts" \
-              --jq '.artifacts[] | select(.name == "raw-sqlite-state") | .id'
-          )"
-
-          if [[ -z "${artifact_id}" ]]; then
-            echo "The latest successful run has no raw-state artifact." >&2
-            echo "Run this workflow manually with reset_state enabled to start fresh." >&2
-            exit 1
+          if [[ -z "${latest_run_id}" ]]; then
+            echo "No earlier published state exists; bootstrapping fresh databases."
+            exit 0
           fi
 
           mkdir -p "${RESTORED_STATE_DIRECTORY}"
@@ -87,23 +90,68 @@ jobs:
             --snapshot-directory "${RESTORED_STATE_DIRECTORY}"
 
       - name: Build the Airflow image
+        id: build_airflow
         run: docker compose build airflow
 
       - name: Initialize ephemeral Airflow metadata
+        id: init_airflow
         shell: bash
         run: |
           docker compose run --rm --no-deps \
             --user "$(id -u):0" \
             airflow airflow db migrate
 
-      - name: Execute the complete Airflow DAG once
+      - name: Execute each source DAG independently
+        id: source_dags
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+
+          run_source_dag() {
+            local output_name="$1"
+            local dag_id="$2"
+
+            echo "::group::${dag_id}"
+            docker compose run --rm --no-deps \
+              --user "$(id -u):0" \
+              airflow airflow dags test "${dag_id}"
+            local exit_code=$?
+            echo "::endgroup::"
+            echo "${output_name}=${exit_code}" >> "${GITHUB_OUTPUT}"
+            if [[ "${exit_code}" -ne 0 ]]; then
+              echo "::error title=${dag_id} failed::The remaining source DAGs will still run."
+            fi
+          }
+
+          run_source_dag who_exit_code who_news_pipeline
+          run_source_dag tech_exit_code tech_news_pipeline
+          run_source_dag economic_exit_code economic_news_pipeline
+          exit 0
+
+      - name: Preserve source updates before the warehouse build
+        id: create_source_state
+        if: always() && steps.init_airflow.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python3 maintenance_scripts/pipeline_state.py create \
+            --project-root . \
+            --snapshot-directory "${SOURCE_STATE_DIRECTORY}" \
+            --source-commit "${GITHUB_SHA}" \
+            --workflow-run-id "${GITHUB_RUN_ID}"
+
+      - name: Build the shared dbt warehouse
+        id: warehouse_dag
+        continue-on-error: true
         shell: bash
         run: |
           docker compose run --rm --no-deps \
             --user "$(id -u):0" \
-            airflow airflow dags test who_news_pipeline
+            airflow airflow dags test news_warehouse_pipeline
 
-      - name: Create validated pipeline database state
+      - name: Create warehouse-backed pipeline database state
+        id: create_state
+        if: always() && steps.warehouse_dag.outcome == 'success'
         run: |
           python3 maintenance_scripts/pipeline_state.py create \
             --project-root . \
@@ -111,27 +159,74 @@ jobs:
             --source-commit "${GITHUB_SHA}" \
             --workflow-run-id "${GITHUB_RUN_ID}"
 
-      - name: Verify every published pipeline output exists
+      - name: Verify published pipeline outputs
+        id: verify_outputs
+        if: always() && steps.warehouse_dag.outcome == 'success'
         shell: bash
+        env:
+          WHO_EXIT_CODE: ${{ steps.source_dags.outputs.who_exit_code }}
+          TECH_EXIT_CODE: ${{ steps.source_dags.outputs.tech_exit_code }}
+          ECONOMIC_EXIT_CODE: ${{ steps.source_dags.outputs.economic_exit_code }}
         run: |
           python3 - <<'PY'
+          import os
           import sys
           from pathlib import Path
 
           sys.path.insert(0, str(Path("dags").resolve()))
-          from news_pipeline_config import ALL_FETCH_JOBS
+          from news_pipeline_config import (
+              ECONOMIC_FETCH_JOBS,
+              TECH_FETCH_JOBS,
+              WHO_FETCH_JOBS,
+          )
 
           expected = [
               Path("warehouse/analytics.db"),
               Path("warehouse/snapshot_history.db"),
           ]
-          expected.extend(Path(job.output) for job in ALL_FETCH_JOBS)
+          source_runs = (
+              (os.environ["WHO_EXIT_CODE"], WHO_FETCH_JOBS),
+              (os.environ["TECH_EXIT_CODE"], TECH_FETCH_JOBS),
+              (os.environ["ECONOMIC_EXIT_CODE"], ECONOMIC_FETCH_JOBS),
+          )
+          for exit_code, jobs in source_runs:
+              if exit_code == "0":
+                  expected.extend(Path(job.output) for job in jobs)
+
           missing = [path.as_posix() for path in expected if not path.is_file()]
           if missing:
               raise SystemExit("Missing pipeline outputs: " + ", ".join(missing))
           PY
 
+      - name: Select validated state for publication
+        id: select_state
+        if: always()
+        shell: bash
+        env:
+          FINAL_STATE_OUTCOME: ${{ steps.create_state.outcome }}
+          SOURCE_STATE_OUTCOME: ${{ steps.create_source_state.outcome }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${FINAL_STATE_OUTCOME}" == "success" ]] && \
+             [[ -f "${PUBLISHED_STATE_DIRECTORY}/manifest.json" ]]; then
+            selected_directory="${PUBLISHED_STATE_DIRECTORY}"
+            selected_kind="warehouse-backed"
+          elif [[ "${SOURCE_STATE_OUTCOME}" == "success" ]] && \
+               [[ -f "${SOURCE_STATE_DIRECTORY}/manifest.json" ]]; then
+            selected_directory="${SOURCE_STATE_DIRECTORY}"
+            selected_kind="source-only fallback"
+          else
+            echo "No validated pipeline state is available to publish." >&2
+            exit 1
+          fi
+
+          echo "directory=${selected_directory}" >> "${GITHUB_OUTPUT}"
+          echo "Publishing ${selected_kind} state from ${selected_directory}."
+
       - name: Upload analytics databases and latest-run JSON
+        id: upload_analytics
+        if: always() && steps.verify_outputs.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: news-analytics-${{ github.run_id }}
@@ -150,17 +245,80 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 6
+          overwrite: true
 
       - name: Save pipeline database state for the next scheduled run
+        id: upload_state
+        if: always() && steps.select_state.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: raw-sqlite-state
-          path: ${{ env.PUBLISHED_STATE_DIRECTORY }}
+          path: ${{ steps.select_state.outputs.directory }}
           if-no-files-found: error
           retention-days: 90
           compression-level: 6
+          overwrite: true
 
       - name: Remove ephemeral Airflow containers and volumes
+        id: cleanup_airflow
         if: always()
         continue-on-error: true
         run: docker compose down --volumes --remove-orphans
+
+      - name: Report independent DAG results
+        if: always()
+        shell: bash
+        env:
+          BUILD_OUTCOME: ${{ steps.build_airflow.outcome }}
+          INIT_OUTCOME: ${{ steps.init_airflow.outcome }}
+          SOURCE_STEP_OUTCOME: ${{ steps.source_dags.outcome }}
+          WHO_EXIT_CODE: ${{ steps.source_dags.outputs.who_exit_code }}
+          TECH_EXIT_CODE: ${{ steps.source_dags.outputs.tech_exit_code }}
+          ECONOMIC_EXIT_CODE: ${{ steps.source_dags.outputs.economic_exit_code }}
+          WAREHOUSE_OUTCOME: ${{ steps.warehouse_dag.outcome }}
+          STATE_OUTCOME: ${{ steps.create_state.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify_outputs.outcome }}
+          STATE_SELECTION_OUTCOME: ${{ steps.select_state.outcome }}
+          ANALYTICS_UPLOAD_OUTCOME: ${{ steps.upload_analytics.outcome }}
+          STATE_UPLOAD_OUTCOME: ${{ steps.upload_state.outcome }}
+        run: |
+          set -uo pipefail
+          failed=0
+
+          check_step() {
+            local label="$1"
+            local outcome="$2"
+            if [[ "${outcome}" != "success" ]]; then
+              echo "::error title=${label}::Outcome: ${outcome:-not run}"
+              failed=1
+            fi
+          }
+
+          check_dag() {
+            local label="$1"
+            local exit_code="$2"
+            if [[ "${exit_code}" != "0" ]]; then
+              echo "::error title=${label}::Exit code: ${exit_code:-not run}"
+              failed=1
+            fi
+          }
+
+          check_step "Airflow image build" "${BUILD_OUTCOME}"
+          check_step "Airflow metadata initialization" "${INIT_OUTCOME}"
+          check_step "Source DAG execution step" "${SOURCE_STEP_OUTCOME}"
+          check_dag "WHO DAG failed" "${WHO_EXIT_CODE}"
+          check_dag "Tech DAG failed" "${TECH_EXIT_CODE}"
+          check_dag "Economic DAG failed" "${ECONOMIC_EXIT_CODE}"
+          check_step "Warehouse DAG" "${WAREHOUSE_OUTCOME}"
+          if [[ "${WAREHOUSE_OUTCOME}" == "success" ]]; then
+            check_step "Pipeline state creation" "${STATE_OUTCOME}"
+            check_step "Output verification" "${VERIFY_OUTCOME}"
+            check_step "Analytics artifact upload" "${ANALYTICS_UPLOAD_OUTCOME}"
+          fi
+          check_step "Pipeline state selection" "${STATE_SELECTION_OUTCOME}"
+          check_step "State artifact upload" "${STATE_UPLOAD_OUTCOME}"
+
+          if [[ "${failed}" -ne 0 ]]; then
+            exit 1
+          fi
+          echo "All independent source DAGs and the warehouse DAG succeeded."

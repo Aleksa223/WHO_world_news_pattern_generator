@@ -88,6 +88,22 @@ RETENTION_TARGETS = (
         table="economic_articles",
     ),
 )
+RETENTION_TARGETS_BY_NAME = {target.name: target for target in RETENTION_TARGETS}
+
+
+def select_retention_targets(
+    names: Sequence[str] | None,
+) -> tuple[RetentionTarget, ...]:
+    """Resolve an optional target-name allowlist without accepting paths."""
+    if not names:
+        return RETENTION_TARGETS
+
+    unknown_names = set(names) - RETENTION_TARGETS_BY_NAME.keys()
+    if unknown_names:
+        raise ValueError(
+            "unknown retention target(s): " + ", ".join(sorted(unknown_names))
+        )
+    return tuple(RETENTION_TARGETS_BY_NAME[name] for name in dict.fromkeys(names))
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -195,9 +211,7 @@ def _validate_audit_link(
             (AUDIT_TABLE,),
         ).fetchone()
         if audit_exists is None:
-            raise RetentionError(
-                f"Ingestion audit table is missing from {database}"
-            )
+            raise RetentionError(f"Ingestion audit table is missing from {database}")
         audit_row = connection.execute(
             f"SELECT 1 FROM {AUDIT_TABLE} "
             "WHERE pipeline_run_id = ? AND source_name = ? LIMIT 1",
@@ -312,9 +326,7 @@ def cleanup_old_articles(
     resolved_targets = []
     for target in targets:
         effective_retention_days = (
-            retention_days
-            if retention_days is not None
-            else target.retention_days
+            retention_days if retention_days is not None else target.retention_days
         )
         cutoff = calculate_cutoff(
             as_of=as_of_utc,
@@ -389,6 +401,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--target",
+        action="append",
+        choices=tuple(RETENTION_TARGETS_BY_NAME),
+        help=(
+            "clean only this configured source; repeat for multiple sources "
+            "(default: clean all configured sources)"
+        ),
+    )
+    parser.add_argument(
         "--as-of",
         type=parse_utc_datetime,
         help="optional ISO UTC time used instead of the current time",
@@ -418,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
             as_of=args.as_of,
             dry_run=args.dry_run,
             pipeline_run_id=args.pipeline_run_id,
+            targets=select_retention_targets(args.target),
         )
     except (RetentionError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

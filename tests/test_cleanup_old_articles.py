@@ -1,7 +1,9 @@
+import io
+import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,13 +15,13 @@ from maintenance_scripts.cleanup_old_articles import (
     RetentionTarget,
     calculate_cutoff,
     cleanup_old_articles,
+    main,
 )
 from maintenance_scripts.ingestion_audit import (
     AUDIT_TABLE,
     AuditTarget,
     begin_ingestion_audit,
 )
-
 
 AS_OF = datetime(2026, 10, 16, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -91,9 +93,7 @@ class CleanupOldArticlesTests(unittest.TestCase):
                 ) as connection:
                     retained_by_database[target.name] = {
                         row[0]
-                        for row in connection.execute(
-                            f"SELECT id FROM {target.table}"
-                        )
+                        for row in connection.execute(f"SELECT id FROM {target.table}")
                     }
 
         self.assertIsNone(report["retention_days_override"])
@@ -196,6 +196,40 @@ class CleanupOldArticlesTests(unittest.TestCase):
         self.assertEqual(report["eligible_total"], 3)
         self.assertEqual(report["deleted_total"], 0)
         self.assertEqual(counts, [1, 1, 1])
+
+    def test_cli_target_limits_cleanup_to_one_source(self):
+        tech_target = next(
+            target for target in RETENTION_TARGETS if target.name == "tech_news"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            create_target_database(
+                project_root,
+                tech_target,
+                [("old", "2020-01-01T00:00:00Z")],
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "--project-root",
+                        str(project_root),
+                        "--target",
+                        "tech_news",
+                        "--as-of",
+                        "2026-10-16T12:00:00Z",
+                        "--dry-run",
+                    ]
+                )
+
+            report = json.loads(output.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            [database["name"] for database in report["databases"]],
+            ["tech_news"],
+        )
+        self.assertEqual(report["eligible_total"], 1)
 
     def test_retention_updates_the_matching_ingestion_audit(self):
         target = RetentionTarget(

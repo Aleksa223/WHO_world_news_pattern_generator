@@ -235,8 +235,8 @@ sqlite3 -header -column warehouse/analytics.db "SELECT topic_rank, topic, groupe
 sqlite3 -header -column warehouse/analytics.db "SELECT category, topic_rank, topic, grouped_words, unique_title_count, content_count FROM who_mart_top_title_topics ORDER BY category, topic_rank;"
 ```
 
-The technology-news fetcher can be run standalone with the command above. It is
-also included in the daily Airflow pipeline described below.
+The technology-news fetcher can be run standalone with the command above. It
+also has its own daily Airflow DAG described below.
 
 ## Fetch economic news
 
@@ -320,8 +320,8 @@ Query the downloaded articles directly with:
 sqlite3 -header -column economic_articles/economic_news.db "SELECT title, source, source_country, published_at FROM economic_articles ORDER BY published_at DESC LIMIT 10;"
 ```
 
-The economic-news fetcher can be run standalone with the command above. It is
-also included in the daily Airflow pipeline. Its dbt source and
+The economic-news fetcher can be run standalone with the command above. It
+also has its own daily Airflow DAG. Its dbt source and
 `economic_stg_articles` model live under `staging/economic/`. The models under
 `marts/economic/` provide a daily publisher-country summary and a daily ranking
 of the ten source domains contributing the most feed results.
@@ -420,15 +420,22 @@ indefinite history is not desired.
 
 ## Orchestrate with Airflow
 
-When an Airflow scheduler is running, the DAG in `dags/who_news_pipeline.py`
-runs every day at 06:00 UTC. It starts the seven WHO fetchers plus the Hacker
-News and GDELT economic-news fetchers in parallel, writing each source to its
-SQLite database configured in `profiles.yml`. After all nine fetch tasks
-succeed, it runs `dbt build` across the WHO, Tech, and Economic staging,
-intermediate, mart, seed, and snapshot resources and their tests, refreshing
+Airflow exposes four separate DAGs:
+
+- `who_news_pipeline` runs the seven WHO fetchers.
+- `tech_news_pipeline` runs the Hacker News fetcher.
+- `economic_news_pipeline` runs the GDELT economic-news fetcher.
+- `news_warehouse_pipeline` performs the one shared dbt build.
+
+The three source DAGs run daily at 06:00 UTC. They write only their own raw
+SQLite databases, retry a failed fetch twice, and do not depend on one another.
+For example, a GDELT failure does not stop WHO or Hacker News from completing.
+The warehouse DAG runs at 08:00 UTC, with a 40-minute buffer beyond the source
+tasks' maximum configured fetch, cleanup, and retry window. It builds and tests
+all WHO, Tech, Economic, shared mart, seed, and snapshot resources, refreshing
 `warehouse/analytics.db` and capturing article changes in
-`warehouse/snapshot_history.db`. A failed fetch is retried twice and prevents
-dbt from building a partial daily refresh.
+`warehouse/snapshot_history.db`. Keeping dbt in one later DAG also prevents
+concurrent processes from writing to the same SQLite warehouse files.
 
 Every fetch task requests a batch of up to 200 unseen records per daily run.
 This is not a 200-row database limit. WHO and Hacker News also refresh a
@@ -441,14 +448,14 @@ item fails validation, or no unseen source records exist. The JSON output files
 are latest-run snapshots and are overwritten on the next run; retained history
 is stored in SQLite.
 
-After every scheduled fetch, Airflow deletes general WHO news older than 365
-days and Hacker News stories or economic articles older than 90 days before
-rebuilding dbt. Each database receives its own cutoff. A row exactly on its
-cutoff is retained, as are rows with missing or invalid dates. Campaigns,
+After each scheduled source fetch, that source's DAG applies only its own
+retention policy. General WHO news older than 365 days is deleted; Hacker News
+stories and economic articles older than 90 days are deleted. A row exactly on
+its cutoff is retained, as are rows with missing or invalid dates. Campaigns,
 events, speeches, statements, commentaries, and feature stories are not cleaned
 automatically because their date semantics are not all equivalent. The
 incremental fetch can briefly re-ingest an older upstream record, but the same
-DAG run removes it before refreshing `warehouse/analytics.db`.
+source DAG removes it before the later warehouse refresh.
 
 Preview the cleanup without deleting anything:
 
@@ -460,6 +467,12 @@ Run the same cleanup manually with:
 
 ```powershell
 python maintenance_scripts/cleanup_old_articles.py
+```
+
+Limit a manual cleanup to one allowlisted source with `--target`:
+
+```powershell
+python maintenance_scripts/cleanup_old_articles.py --target tech_news
 ```
 
 Passing `--retention-days N` is an explicit override that applies `N` days to
@@ -476,9 +489,10 @@ same raw SQLite database as its source data. The record includes the requested
 and selected row counts, newly inserted and refreshed rows, retention
 deletions, total database rows, oldest and newest valid publication times,
 articles published on that UTC date, and a `running`, `succeeded`, or `failed`
-status. Airflow passes one shared `pipeline_run_id` to all nine fetchers, while
-manual fetches receive a generated `manual:` run ID. Error messages are
-whitespace-normalized and limited to 2,000 characters.
+status. The seven WHO tasks share their WHO DAG run ID; Tech and Economic each
+receive the run ID of their own DAG. Manual fetches receive a generated
+`manual:` run ID. Error messages are whitespace-normalized and limited to
+2,000 characters.
 
 Campaigns and events do not have a reliable raw publication-time field, so
 their oldest, newest, and published-today metrics are intentionally null. Raw
@@ -493,10 +507,17 @@ dbt build --select +ops_mart_ingestion_runs --profiles-dir .
 sqlite3 -header -column warehouse/analytics.db "SELECT pipeline_run_id, source_name, status, new_rows, refreshed_rows, deleted_rows, total_rows, published_today_rows, oldest_published_at, newest_published_at FROM ops_mart_ingestion_runs ORDER BY started_at DESC LIMIT 30;"
 ```
 
-If a scheduled fetch fails, dbt correctly skips the partial warehouse refresh.
-That failure is available immediately in the affected raw database and appears
-in the unified operations mart after the next successful dbt build. For
-example:
+If a scheduled fetch fails, only that source DAG is marked failed. The other
+source DAGs still run, and the independently scheduled warehouse DAG can build
+from the latest valid raw data already present for the failed source. The
+failure is available immediately in the affected raw database and appears in
+the unified operations mart after the next successful dbt build. For example:
+
+Two configured cache fallbacks are intentionally treated as degraded success:
+a rate-limited GDELT request can reuse valid Economic data, and a WHO Events
+source error can reuse valid cached events. Those tasks remain green so cached
+data does not block the pipeline, while their ingestion-audit rows still record
+the upstream failure.
 
 ```powershell
 sqlite3 -header -column tech_articles/tech_news.db "SELECT pipeline_run_id, status, error_type, error_message, started_at FROM ingestion_audit ORDER BY started_at DESC LIMIT 10;"
@@ -510,22 +531,27 @@ python maintenance_scripts/ingestion_audit.py --run-id bootstrap
 
 ### Run while your computer is off with GitHub Actions
 
-The workflow in `.github/workflows/daily-news.yml` runs the complete Airflow
-DAG on a GitHub-hosted Linux machine every day at 06:17 UTC. The non-zero minute
-reduces the chance of GitHub's top-of-hour scheduling delays. It can also be
-started manually from the repository's **Actions** tab. Your computer and
-Docker Desktop do not need to be running.
+The workflow in `.github/workflows/daily-news.yml` runs on a GitHub-hosted Linux
+machine every day at 06:17 UTC. It executes the WHO, Tech, and Economic DAGs
+independently and records each result, so a failed source does not prevent the
+remaining source DAGs from running. It then runs the shared warehouse DAG once.
+The non-zero minute reduces the chance of GitHub's top-of-hour scheduling
+delays. The workflow can also be started manually from the repository's
+**Actions** tab. Your computer and Docker Desktop do not need to be running.
 
-GitHub-hosted runners are temporary, so the workflow stores the nine raw SQLite
-databases plus `warehouse/snapshot_history.db` as a validated
-`raw-sqlite-state` workflow artifact after a successful run. The next run
-restores that state before fetching. The state snapshot uses SQLite's backup
-API, checks each database and expected table, and includes checksums in
-`manifest.json`. Legacy state artifacts containing only the nine raw databases
-are still accepted once for migration. `warehouse/analytics.db` is deliberately
-rebuilt from raw data rather than restored, then it and the snapshot-history
-database are uploaded with the latest JSON files as a separate
-`news-analytics-<run-id>` artifact.
+GitHub-hosted runners are temporary, so after a valid warehouse build the
+workflow stores the nine raw SQLite databases plus
+`warehouse/snapshot_history.db` as a validated `raw-sqlite-state` artifact. It
+publishes this combined state before its final result check. Consequently,
+successful sources are preserved even when another source DAG makes the
+overall workflow run red. The next run restores the newest published state,
+including state from such a partially failed workflow. The snapshot uses
+SQLite's backup API, checks each database and expected table, and includes
+checksums in `manifest.json`. Legacy state artifacts containing only the nine
+raw databases are still accepted once for migration. `warehouse/analytics.db`
+is deliberately rebuilt from raw data rather than restored, then it and the
+snapshot-history database are uploaded with available latest-run JSON files as
+a separate `news-analytics-<run-id>` artifact.
 
 To enable cloud scheduling:
 
@@ -560,9 +586,11 @@ directory:
 docker compose up --build
 ```
 
-Open <http://localhost:8080>, find `who_news_pipeline`, enable it, and use the
-play button to trigger the first run. Authentication is disabled for this
-localhost-only development setup. Stop the containers with:
+Open <http://localhost:8080> and enable `who_news_pipeline`,
+`tech_news_pipeline`, `economic_news_pipeline`, and `news_warehouse_pipeline`.
+To run them immediately, trigger the three source DAGs first and then trigger
+the warehouse DAG. Authentication is disabled for this localhost-only
+development setup. Stop the containers with:
 
 ```powershell
 docker compose down
@@ -592,7 +620,7 @@ export AIRFLOW__CORE__DAGS_FOLDER="$PWD/dags"
 airflow standalone
 ```
 
-If the DAG file is deployed separately from this repository, set
+If the DAG files are deployed separately from this repository, set
 `WHO_NEWS_PROJECT_ROOT` to the absolute project directory visible to the
 Airflow worker.
 
