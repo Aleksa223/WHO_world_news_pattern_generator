@@ -59,7 +59,7 @@ jobs:
               --limit 100 \
               --json databaseId \
               --jq '.[].databaseId'
-          )
+          )"
           latest_run_id=""
           if [[ -n "${candidate_run_ids}" ]]; then
             while IFS= read -r candidate_run_id; do
